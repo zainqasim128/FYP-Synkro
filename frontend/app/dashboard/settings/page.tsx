@@ -12,7 +12,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Mail, Link2, Link2Off, RefreshCw, Loader2, CheckCircle2, XCircle,
-  Users, Shield, UserCheck, UserX, Trash2
+  AlertCircle, Users, Shield, UserCheck, UserX, Trash2
 } from 'lucide-react'
 import type { Integration, AdminUserStats, AdminTeamResponse, AdminTeamUser, UserRole } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
@@ -68,7 +68,7 @@ export default function SettingsPage() {
   }, [searchParams])
 
   // Fetch integrations
-  const { data: integrationsData } = useQuery<{ data: Integration[] }>({
+  const { data: integrationsData, isLoading: integrationsLoading } = useQuery<{ data: Integration[] }>({
     queryKey: ['integrations'],
     queryFn: () => integrationsApi.getIntegrations(),
   })
@@ -77,6 +77,7 @@ export default function SettingsPage() {
   const gmailIntegration = integrations.find((i) => i.platform === 'gmail')
   const slackIntegration = integrations.find((i) => i.platform === 'slack')
   const jiraIntegration = integrations.find((i) => i.platform === 'jira')
+  const zoomIntegration = integrations.find((i) => i.platform === 'zoom')
 
   // Admin: Fetch user stats
   const { data: userStatsData, refetch: refetchUserStats } = useQuery<{ data: AdminUserStats }>({
@@ -137,15 +138,16 @@ export default function SettingsPage() {
 
   // Slack OAuth start mutation
   const startSlackOAuthMutation = useMutation({
-    mutationFn: () => integrationsApi.startSlackOAuth(),
-    onSuccess: (res: any) => {
-      // Redirect user to Slack authorization page
-      window.location.href = res.data.authorization_url
+    mutationFn: () => integrationsApi.connectSlackDemo(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['integrations'] })
+      setIntegrationMessage({ type: 'success', text: 'Slack connected successfully!' })
+      setTimeout(() => setIntegrationMessage(null), 3000)
     },
     onError: (err: any) => {
       setIntegrationMessage({
         type: 'error',
-        text: err.response?.data?.detail || 'Failed to start Slack OAuth.',
+        text: err.response?.data?.detail || 'Failed to connect Slack.',
       })
       setTimeout(() => setIntegrationMessage(null), 5000)
     },
@@ -177,27 +179,13 @@ export default function SettingsPage() {
     },
   })
 
-  const [disconnectingId, setDisconnectingId] = useState<string | null>(null)
-
-  // Disconnect mutation — shared handler, tracks which integration is being removed
+  // Disconnect mutation
   const disconnectMutation = useMutation({
-    mutationFn: ({ id }: { id: string; name: string }) => {
-      setDisconnectingId(id)
-      return integrationsApi.disconnectIntegration(id)
-    },
-    onSuccess: (_data, { name }) => {
-      setDisconnectingId(null)
+    mutationFn: (integrationId: string) => integrationsApi.disconnectIntegration(integrationId),
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['integrations'] })
-      setIntegrationMessage({ type: 'success', text: `${name} disconnected` })
+      setIntegrationMessage({ type: 'success', text: 'Gmail disconnected' })
       setTimeout(() => setIntegrationMessage(null), 3000)
-    },
-    onError: (err: any, { name }) => {
-      setDisconnectingId(null)
-      setIntegrationMessage({
-        type: 'error',
-        text: err.response?.data?.detail || `Failed to disconnect ${name}. Please try again.`,
-      })
-      setTimeout(() => setIntegrationMessage(null), 5000)
     },
   })
 
@@ -216,6 +204,24 @@ export default function SettingsPage() {
       setIntegrationMessage({
         type: 'error',
         text: err.response?.data?.detail || 'Sync failed. Check your Gmail connection.',
+      })
+      setTimeout(() => setIntegrationMessage(null), 5000)
+    },
+  })
+
+  // Zoom OAuth start
+  const startZoomOAuthMutation = useMutation({
+    mutationFn: () => integrationsApi.startZoomOAuth(),
+    onSuccess: (response) => {
+      const url = response.data?.authorization_url
+      if (url) {
+        window.location.href = url
+      }
+    },
+    onError: (err: any) => {
+      setIntegrationMessage({
+        type: 'error',
+        text: err.response?.data?.detail || 'Failed to start Zoom OAuth.',
       })
       setTimeout(() => setIntegrationMessage(null), 5000)
     },
@@ -314,7 +320,7 @@ export default function SettingsPage() {
 
   const handleDisconnect = (integrationId: string, name: string) => {
     if (confirm(`Are you sure you want to disconnect ${name}?`)) {
-      disconnectMutation.mutate({ id: integrationId, name })
+      disconnectMutation.mutate(integrationId)
     }
   }
 
@@ -694,11 +700,11 @@ export default function SettingsPage() {
                         variant="outline"
                         size="sm"
                         onClick={() => handleDisconnect(gmailIntegration.id, 'Gmail')}
-                        disabled={disconnectingId === gmailIntegration.id}
+                        disabled={disconnectMutation.isPending}
                         className="text-red-600 hover:text-red-700 hover:bg-red-50"
                         title="Disconnect"
                       >
-                        {disconnectingId === gmailIntegration.id ? (
+                        {disconnectMutation.isPending ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
                         ) : (
                           <Link2Off className="h-4 w-4" />
@@ -838,11 +844,11 @@ export default function SettingsPage() {
                         variant="outline"
                         size="sm"
                         onClick={() => handleDisconnect(slackIntegration.id, 'Slack')}
-                        disabled={disconnectingId === slackIntegration.id}
+                        disabled={disconnectMutation.isPending}
                         className="text-red-600 hover:text-red-700 hover:bg-red-50"
                         title="Disconnect"
                       >
-                        {disconnectingId === slackIntegration.id ? (
+                        {disconnectMutation.isPending ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
                         ) : (
                           <Link2Off className="h-4 w-4" />
@@ -923,11 +929,11 @@ export default function SettingsPage() {
                         variant="outline"
                         size="sm"
                         onClick={() => handleDisconnect(jiraIntegration.id, 'Jira')}
-                        disabled={disconnectingId === jiraIntegration.id}
+                        disabled={disconnectMutation.isPending}
                         className="text-red-600 hover:text-red-700 hover:bg-red-50"
                         title="Disconnect"
                       >
-                        {disconnectingId === jiraIntegration.id ? (
+                        {disconnectMutation.isPending ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
                         ) : (
                           <Link2Off className="h-4 w-4" />
@@ -1039,6 +1045,78 @@ export default function SettingsPage() {
                   </Button>
                 </div>
               )}
+            </div>
+
+            {/* Zoom */}
+            <div className="border rounded-lg overflow-hidden">
+              <div className="flex items-center justify-between p-4">
+                <div className="flex items-center gap-3">
+                  <div className="h-10 w-10 rounded-lg bg-blue-100 dark:bg-blue-950 flex items-center justify-center">
+                    <svg className="h-5 w-5 text-blue-500" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M24 12c0 6.627-5.373 12-12 12S0 18.627 0 12 5.373 0 12 0s12 5.373 12 12zm-7.5-4.5H9A1.5 1.5 0 007.5 9v6A1.5 1.5 0 009 16.5h7.5A1.5 1.5 0 0018 15V9a1.5 1.5 0 00-1.5-1.5zm4.125 1.781l-3.375 2.25v1.938l3.375 2.25a.375.375 0 00.375-.375V9.657a.375.375 0 00-.375-.376z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <p className="font-medium">Zoom</p>
+                    {zoomIntegration ? (
+                      <div className="space-y-0.5">
+                        <p className="text-xs text-muted-foreground">
+                          {zoomIntegration.metadata?.email || zoomIntegration.metadata?.display_name || 'Connected'}
+                        </p>
+                        {zoomIntegration.last_synced_at && (
+                          <p className="text-xs text-muted-foreground">
+                            Last synced: {formatRelativeTime(zoomIntegration.last_synced_at)}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Auto-transcribe Zoom cloud recordings when meetings end
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {zoomIntegration ? (
+                    <>
+                      <Badge variant="default" className="bg-green-600">
+                        <CheckCircle2 className="h-3 w-3 mr-1" />
+                        Connected
+                      </Badge>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleDisconnect(zoomIntegration.id, 'Zoom')}
+                        disabled={disconnectMutation.isPending}
+                        className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                        title="Disconnect"
+                      >
+                        {disconnectMutation.isPending ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Link2Off className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      size="sm"
+                      onClick={() => startZoomOAuthMutation.mutate()}
+                      disabled={startZoomOAuthMutation.isPending}
+                    >
+                      {startZoomOAuthMutation.isPending ? (
+                        <><Loader2 className="h-4 w-4 animate-spin mr-1" /> Redirecting...</>
+                      ) : (
+                        <>
+                          <Link2 className="h-4 w-4 mr-1" />
+                          Connect
+                        </>
+                      )}
+                    </Button>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         </CardContent>

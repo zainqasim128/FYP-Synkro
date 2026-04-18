@@ -21,7 +21,19 @@
       "Bash(python migrate_db.py:*)",
       "Bash(python -c:*)",
       "Bash(lsof:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(cd /Users/mac/Desktop/fypsynkro/frontend && npm run dev 2>&1)",
+      "Bash(cd /Users/mac/Desktop/fypsynkro/backend && source venv/bin/activate && which uvicorn && uvicorn app.main:app --reload --port 8000)",
+      "Bash(cd /Users/mac/Desktop/fypsynkro/backend && ./venv/bin/uvicorn app.main:app --reload --port 8000)",
+      "Bash(./venv/bin/pip install -r requirements.txt 2>&1 | tail -20)",
+      "Bash(./venv/bin/pip install psycopg2-binary --no-build-isolation 2>&1 | tail -5 || echo \"trying alternative...\" && brew list | grep postgresql)",
+      "Bash(./venv/bin/pip install -r requirements.txt --no-build-isolation 2>&1 | tail -10)",
+      "Bash(git fetch fizzah 2>&1)",
+      "Bash(git checkout -b backup-before-merge && git checkout main)",
+      "Bash(git merge fizzah/420 --no-commit --no-ff 2>&1)",
+      "Bash(git merge fizzah/420 --no-commit --no-ff --allow-unrelated-histories 2>&1)",
+      "Bash(git stash && git merge fizzah/420 --no-commit --no-ff --allow-unrelated-histories 2>&1)",
+      "Bash(git stash && git merge -X theirs fizzah/yashaal --allow-unrelated-histories -m \"Merge fizzah/yashaal: DM system, Slack/Jira fixes, OAuth, bug fixes\" 2>&1)"
     ],
     "additionalDirectories": [
       "/Users/mac/Desktop/fyp synkro/backend"

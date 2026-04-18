@@ -10,6 +10,7 @@ from app.database import Base
 
 class MeetingStatus(str, enum.Enum):
     """Meeting processing status"""
+    AWAITING_UPLOAD = "awaiting_upload"  # Created from Zoom webhook, waiting for file
     SCHEDULED = "scheduled"
     PROCESSING = "processing"
     TRANSCRIBED = "transcribed"
@@ -27,10 +28,16 @@ class Meeting(Base):
     duration_minutes = Column(Integer, nullable=True)
     recording_url = Column(String(1000), nullable=True)  # S3 URL or Cloudinary URL
     transcript = Column(Text, nullable=True)
+    diarized_transcript = Column(Text, nullable=True)  # JSON: [{speaker, start, end, text, context_type}]
+    speaker_names = Column(Text, nullable=True)         # JSON: {"Speaker A": "Alice", "Speaker B": "Bob"}
     summary = Column(Text, nullable=True)
     status = Column(SQLEnum(MeetingStatus), default=MeetingStatus.SCHEDULED, nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Zoom integration fields
+    zoom_meeting_id = Column(String(100), nullable=True, index=True)
+    zoom_recording_id = Column(String(100), nullable=True)  # dedup guard
 
     # Foreign Keys
     team_id = Column(String(36), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)

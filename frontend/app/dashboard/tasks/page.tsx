@@ -6,7 +6,6 @@ import { taskApi, dmApi } from '@/lib/api'
 import { useAuthStore } from '@/lib/stores/authStore'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
@@ -263,10 +262,23 @@ export default function TasksPage() {
     },
   })
 
-  // Delete mutation
+  const queryKey = ['tasks', statusFilter, priorityFilter]
+
+  // Delete mutation — optimistic: remove immediately, rollback on error
   const deleteMutation = useMutation({
     mutationFn: (id: string) => taskApi.deleteTask(id),
-    onSuccess: () => {
+    onMutate: async (id) => {
+      await queryClient.cancelQueries({ queryKey })
+      const previous = queryClient.getQueryData<{ data: Task[] }>(queryKey)
+      queryClient.setQueryData<{ data: Task[] }>(queryKey, (old) =>
+        old ? { ...old, data: old.data.filter((t) => t.id !== id) } : old
+      )
+      return { previous }
+    },
+    onError: (_err, _id, context: any) => {
+      if (context?.previous) queryClient.setQueryData(queryKey, context.previous)
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
       queryClient.invalidateQueries({ queryKey: ['task-stats'] })
     },
@@ -274,9 +286,29 @@ export default function TasksPage() {
 
   // Quick status update (cycle through all 4 statuses)
   const updateStatusMutation = useMutation({
-    mutationFn: ({ id, status }: { id: string; status: string }) =>
-      taskApi.updateTask(id, { status }),
-    onSuccess: () => {
+    mutationFn: ({ id, status, priority }: { id: string; status?: string; priority?: string }) =>
+      taskApi.updateTask(id, { ...(status !== undefined && { status }), ...(priority !== undefined && { priority }) }),
+    onMutate: async ({ id, status, priority }) => {
+      await queryClient.cancelQueries({ queryKey })
+      const previous = queryClient.getQueryData<{ data: Task[] }>(queryKey)
+      queryClient.setQueryData<{ data: Task[] }>(queryKey, (old) =>
+        old
+          ? {
+              ...old,
+              data: old.data.map((t) =>
+                t.id === id
+                  ? { ...t, ...(status !== undefined && { status: status as Task['status'] }), ...(priority !== undefined && { priority: priority as Task['priority'] }) }
+                  : t
+              ),
+            }
+          : old
+      )
+      return { previous }
+    },
+    onError: (_err, _vars, context: any) => {
+      if (context?.previous) queryClient.setQueryData(queryKey, context.previous)
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
       queryClient.invalidateQueries({ queryKey: ['task-stats'] })
     },
@@ -441,7 +473,7 @@ export default function TasksPage() {
                   </div>
 
                   {task.description && (
-                    <p className="text-sm text-muted-foreground mb-2 line-clamp-2">
+                    <p className="text-sm text-muted-foreground mb-3 line-clamp-2">
                       {task.description}
                     </p>
                   )}

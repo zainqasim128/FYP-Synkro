@@ -108,6 +108,8 @@ export function getStatusColor(status: string): string {
     case 'blocked':
       return 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'
     // Meeting statuses
+    case 'awaiting_upload':
+      return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300'
     case 'processing':
       return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300'
     case 'transcribed':

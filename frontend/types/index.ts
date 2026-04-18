@@ -74,6 +74,24 @@ export interface TaskStats {
   completion_rate: number;
 }
 
+export type ContextType =
+  | 'task_assignment'
+  | 'task_completion'
+  | 'warning'
+  | 'progress_update'
+  | 'question'
+  | 'decision'
+  | 'general'
+
+export interface DiarizedSegment {
+  speaker: string
+  start: number
+  end: number
+  text: string
+  context_type?: ContextType
+  context_details?: string
+}
+
 export interface Meeting {
   id: string;
   title: string;
@@ -81,13 +99,17 @@ export interface Meeting {
   duration_minutes?: number;
   recording_url?: string;
   transcript?: string;
+  diarized_transcript?: string;  // JSON string of DiarizedSegment[]
+  speaker_names?: string;        // JSON string: {"Speaker A": "Alice"}
   summary?: string;
-  status: 'scheduled' | 'processing' | 'transcribed' | 'completed' | 'failed';
+  status: 'awaiting_upload' | 'scheduled' | 'processing' | 'transcribed' | 'completed' | 'failed';
   team_id: string;
   created_by_id?: string;
   created_at: string;
   updated_at?: string;
   action_items: ActionItem[];
+  zoom_meeting_id?: string;
+  zoom_recording_id?: string;
 }
 
 export interface ActionItem {
@@ -101,6 +123,10 @@ export interface ActionItem {
   meeting_id?: string;
   message_id?: string;
   created_at: string;
+  // Speaker diarization fields
+  speaker_label?: string
+  assigned_by?: string
+  context_type?: ContextType
 }
 
 export interface ChatQuery {
@@ -143,7 +169,7 @@ export interface TokenResponse {
 // Integration types
 export interface Integration {
   id: string;
-  platform: 'gmail' | 'slack' | 'google_calendar' | 'jira' | 'microsoft_teams';
+  platform: 'gmail' | 'slack' | 'google_calendar' | 'jira' | 'microsoft_teams' | 'zoom';
   is_active: boolean;
   last_synced_at?: string;
   created_at: string;

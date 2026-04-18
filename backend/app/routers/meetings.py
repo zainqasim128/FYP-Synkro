@@ -1,5 +1,6 @@
 """Meeting management endpoints - upload, transcribe, summarize"""
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query, BackgroundTasks
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_
 from sqlalchemy.orm import selectinload
@@ -10,8 +11,8 @@ import os
 import logging
 
 from app.database import get_db
-from app.models import Meeting, User, ActionItem, MeetingStatus, ActionItemStatus
-from app.schemas.meeting import MeetingResponse, MeetingUploadResponse, MeetingUpdate
+from app.models import Meeting, User, ActionItem, MeetingStatus
+from app.schemas.meeting import MeetingResponse, MeetingUploadResponse, MeetingUpdate, SpeakerNamesUpdate
 from app.dependencies import get_current_user, get_current_admin_user
 from app.utils.storage import get_storage
 
@@ -27,10 +28,13 @@ MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB (Groq Whisper API limit)
 
 async def process_meeting_background(meeting_id: str):
     """
-    Background task to transcribe and summarize meeting using OpenAI Whisper API.
-    This runs as an async background task within FastAPI's event loop.
+    Background task: transcribe → diarize → context-analyse → summarise.
+    Runs inside FastAPI's async event loop (no Celery needed).
     """
-    from app.services.ai_service import transcribe_meeting, summarize_meeting
+    import json as _json
+    from app.services.ai_service import transcribe_meeting_with_segments
+    from app.services.diarization_service import diarize_audio, format_diarized_transcript
+    from app.services.meeting_analysis_service import analyze_meeting_context, generate_speaker_aware_summary
     from app.database import AsyncSessionLocal
 
     tmp_file_path = None
@@ -39,7 +43,6 @@ async def process_meeting_background(meeting_id: str):
         logger.info(f"[Meeting {meeting_id}] Starting background processing")
 
         async with AsyncSessionLocal() as db:
-            # Get meeting
             result = await db.execute(select(Meeting).where(Meeting.id == meeting_id))
             meeting = result.scalar_one_or_none()
 
@@ -53,11 +56,9 @@ async def process_meeting_background(meeting_id: str):
                 await db.commit()
                 return
 
-            # Download audio file
+            # ── Download audio ────────────────────────────────────────
             storage = get_storage()
             recording_url = meeting.recording_url
-
-            # Extract key from URL
             if recording_url.startswith('local://'):
                 key = recording_url.replace('local://', '')
             elif '.amazonaws.com/' in recording_url:
@@ -67,74 +68,136 @@ async def process_meeting_background(meeting_id: str):
             else:
                 key = recording_url.split('.com/')[-1] if '.com/' in recording_url else recording_url
 
-            # Create temp file
             file_ext = os.path.splitext(key)[1]
             with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
                 tmp_file_path = tmp_file.name
 
             logger.info(f"[Meeting {meeting_id}] Downloading to {tmp_file_path}")
-
-            # Download file
             await storage.download_file(key, tmp_file_path)
 
-            # Check file size
             file_size_mb = os.path.getsize(tmp_file_path) / (1024 * 1024)
             logger.info(f"[Meeting {meeting_id}] File size: {file_size_mb:.2f}MB")
 
-            # Transcribe using OpenAI Whisper API
-            logger.info(f"[Meeting {meeting_id}] Starting transcription via OpenAI Whisper API...")
-            transcript = await transcribe_meeting(tmp_file_path)
+            # ── Transcribe (Whisper) ──────────────────────────────────
+            logger.info(f"[Meeting {meeting_id}] Transcribing…")
+            transcript, whisper_segments = await transcribe_meeting_with_segments(tmp_file_path)
+            logger.info(
+                f"[Meeting {meeting_id}] Transcription complete — "
+                f"{len(transcript)} chars, {len(whisper_segments)} Whisper segments"
+            )
 
-            # Calculate duration from audio file (rough estimation from file size)
-            duration_minutes = max(1, int(file_size_mb * 2))
+            # ── Duration ─────────────────────────────────────────────
+            try:
+                from mutagen import File as MutagenFile
+                audio = MutagenFile(tmp_file_path)
+                if audio and hasattr(audio.info, 'length'):
+                    meeting.duration_minutes = int(audio.info.length / 60)
+                else:
+                    meeting.duration_minutes = max(1, int(file_size_mb * 2))
+            except Exception:
+                meeting.duration_minutes = max(1, int(file_size_mb * 2))
 
-            logger.info(f"[Meeting {meeting_id}] Transcription complete! {len(transcript)} chars, ~{duration_minutes} min")
+            # ── Speaker diarization ───────────────────────────────────
+            logger.info(f"[Meeting {meeting_id}] Diarizing speakers…")
+            try:
+                diarized_segments = await diarize_audio(
+                    audio_file_path=tmp_file_path,
+                    raw_transcript=transcript,
+                    whisper_segments=whisper_segments or None,
+                )
+                diarized_text = format_diarized_transcript(diarized_segments)
+                unique_speakers = len({s['speaker'] for s in diarized_segments})
+                logger.info(
+                    f"[Meeting {meeting_id}] Diarization complete — "
+                    f"{len(diarized_segments)} segments, {unique_speakers} speakers"
+                )
+            except Exception as diar_err:
+                logger.warning(
+                    f"[Meeting {meeting_id}] Diarization failed ({diar_err}), using plain transcript",
+                    exc_info=True,
+                )
+                diarized_segments = []
+                diarized_text = transcript
 
             # Clean up temp file
             os.unlink(tmp_file_path)
             tmp_file_path = None
 
-            # Save transcript
-            meeting.transcript = transcript
-            meeting.duration_minutes = duration_minutes
+            meeting.transcript = diarized_text
+            meeting.diarized_transcript = _json.dumps(diarized_segments) if diarized_segments else None
             meeting.status = MeetingStatus.TRANSCRIBED
             await db.commit()
+            logger.info(f"[Meeting {meeting_id}] Saved transcript → TRANSCRIBED")
 
-            logger.info(f"[Meeting {meeting_id}] Transcript saved, starting summarization")
+            # ── Context analysis ──────────────────────────────────────
+            speakers = []
+            if diarized_segments:
+                try:
+                    analysis_result = await analyze_meeting_context(diarized_segments, meeting.title)
+                    enriched_segs = analysis_result.get("segments", diarized_segments)
+                    speakers = analysis_result.get("speakers", [])
+                    meeting.diarized_transcript = _json.dumps(enriched_segs)
+                    await db.commit()
+                    logger.info(f"[Meeting {meeting_id}] Context analysis done — {len(speakers)} speakers")
+                except Exception as ctx_err:
+                    logger.warning(f"[Meeting {meeting_id}] Context analysis failed: {ctx_err}", exc_info=True)
 
-            # Summarize
-            summary_data = await summarize_meeting(transcript, meeting.title)
+            # ── Summarise ─────────────────────────────────────────────
+            logger.info(f"[Meeting {meeting_id}] Summarising…")
+            try:
+                if diarized_segments and speakers:
+                    summary_data = await generate_speaker_aware_summary(
+                        diarized_transcript=meeting.transcript,
+                        meeting_title=meeting.title,
+                        speakers=speakers,
+                    )
+                else:
+                    from app.services.ai_service import summarize_meeting
+                    summary_data = await summarize_meeting(transcript, meeting.title)
+            except Exception as sum_err:
+                logger.warning(f"[Meeting {meeting_id}] Summarisation failed: {sum_err}", exc_info=True)
+                from app.services.ai_service import summarize_meeting
+                summary_data = await summarize_meeting(transcript, meeting.title)
 
-            # Save summary
-            meeting.summary = summary_data["summary"]
+            meeting.summary = summary_data.get("summary", "")
 
-            # Create action items
+            # ── Action items ──────────────────────────────────────────
             action_items_data = summary_data.get("action_items", [])
             created_count = 0
-
             for item_data in action_items_data:
                 confidence = item_data.get("confidence", 0.0)
                 if confidence >= 0.6:
+                    deadline = item_data.get("deadline")
+                    parsed_deadline = None
+                    if deadline:
+                        try:
+                            import dateparser
+                            parsed_deadline = dateparser.parse(
+                                str(deadline),
+                                settings={"PREFER_DATES_FROM": "future", "RETURN_AS_TIMEZONE_AWARE": False},
+                            )
+                        except Exception:
+                            pass
                     action_item = ActionItem(
                         meeting_id=meeting_id,
                         description=item_data.get("description", ""),
-                        assignee_mentioned=item_data.get("assignee"),
-                        deadline_mentioned=item_data.get("deadline"),
+                        assignee_mentioned=item_data.get("assigned_to_name") or item_data.get("assignee"),
+                        deadline_mentioned=parsed_deadline,
                         confidence_score=confidence,
-                        status="pending"
+                        status="pending",
+                        speaker_label=item_data.get("speaker_label"),
+                        assigned_by=item_data.get("assigned_by"),
+                        context_type=item_data.get("context_type"),
                     )
                     db.add(action_item)
                     created_count += 1
 
             meeting.status = MeetingStatus.COMPLETED
             await db.commit()
-
-            logger.info(f"[Meeting {meeting_id}] Processing complete! {created_count} action items created")
+            logger.info(f"[Meeting {meeting_id}] Complete — {created_count} action items")
 
     except Exception as e:
         logger.error(f"[Meeting {meeting_id}] Processing failed: {str(e)}", exc_info=True)
-
-        # Mark as failed
         try:
             from app.database import AsyncSessionLocal as FailSessionLocal
             async with FailSessionLocal() as db:
@@ -146,11 +209,10 @@ async def process_meeting_background(meeting_id: str):
         except Exception as db_err:
             logger.error(f"[Meeting {meeting_id}] Failed to update status: {str(db_err)}")
 
-        # Clean up temp file
         if tmp_file_path and os.path.exists(tmp_file_path):
             try:
                 os.unlink(tmp_file_path)
-            except:
+            except Exception:
                 pass
 
 
@@ -255,6 +317,94 @@ async def upload_meeting(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Upload failed: {str(e)}"
         )
+
+
+@router.post("/{meeting_id}/upload", response_model=MeetingUploadResponse)
+async def upload_recording_to_meeting(
+    meeting_id: str,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Upload a recording file to an existing AWAITING_UPLOAD meeting (Zoom Track B).
+
+    Attaches the file, transitions the meeting to PROCESSING, and enqueues
+    the transcription pipeline. The meeting must belong to the current user's
+    team and must be in AWAITING_UPLOAD (or FAILED) status.
+    """
+    result = await db.execute(
+        select(Meeting).where(
+            and_(
+                Meeting.id == meeting_id,
+                Meeting.team_id == current_user.team_id,
+            )
+        )
+    )
+    meeting = result.scalar_one_or_none()
+
+    if not meeting:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+
+    if meeting.status not in (MeetingStatus.AWAITING_UPLOAD, MeetingStatus.FAILED):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Meeting is in '{meeting.status.value}' status — only awaiting_upload or failed meetings can receive a new file",
+        )
+
+    file_ext = os.path.splitext(file.filename or "")[1].lower()
+    if file_ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file format. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
+        )
+
+    content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File is empty")
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large. Maximum: {MAX_FILE_SIZE // (1024 * 1024)}MB",
+        )
+
+    try:
+        storage = get_storage()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        with open(tmp_path, "rb") as f:
+            recording_url = await storage.upload_file(
+                f,
+                file.filename or f"recording{file_ext}",
+                folder="meetings",
+                content_type=file.content_type,
+            )
+        os.unlink(tmp_path)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Upload failed: {exc}",
+        )
+
+    meeting.recording_url = recording_url
+    meeting.status = MeetingStatus.PROCESSING
+    meeting.transcript = None
+    meeting.summary = None
+    meeting.diarized_transcript = None
+    await db.commit()
+
+    logger.info("Recording attached to meeting %s — queuing pipeline", meeting_id)
+    background_tasks.add_task(process_meeting_background, meeting_id)
+
+    return {
+        "id": meeting.id,
+        "title": meeting.title,
+        "status": meeting.status.value,
+        "message": "Recording uploaded! Transcription starting...",
+    }
 
 
 @router.get("", response_model=List[MeetingResponse])
@@ -383,6 +533,81 @@ async def update_meeting(
     return meeting
 
 
+@router.patch("/{meeting_id}/speaker-names", response_model=MeetingResponse)
+async def update_speaker_names(
+    meeting_id: str,
+    body: SpeakerNamesUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Persist custom display names for speakers in a meeting.
+
+    Accepts a mapping of generic labels to human names:
+    {"Speaker A": "Alice", "Speaker B": "Bob"}
+    """
+    import json
+
+    result = await db.execute(
+        select(Meeting).where(
+            and_(
+                Meeting.id == meeting_id,
+                Meeting.team_id == current_user.team_id
+            )
+        ).options(selectinload(Meeting.action_items))
+    )
+    meeting = result.scalar_one_or_none()
+
+    if not meeting:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found"
+        )
+
+    meeting.speaker_names = json.dumps(body.speaker_names)
+    await db.commit()
+    await db.refresh(meeting)
+    await db.refresh(meeting, ["action_items"])
+
+    return meeting
+
+
+@router.get("/{meeting_id}/export", response_class=PlainTextResponse)
+async def export_transcript(
+    meeting_id: str,
+    format: str = Query("txt", pattern="^(txt|summary)$"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Export meeting transcript or summary as plain text.
+
+    - format=txt     (default) — full speaker-labeled transcript
+    - format=summary — AI-generated summary
+    """
+    result = await db.execute(
+        select(Meeting).where(
+            and_(Meeting.id == meeting_id, Meeting.team_id == current_user.team_id)
+        )
+    )
+    meeting = result.scalar_one_or_none()
+
+    if not meeting:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+
+    if format == "summary":
+        content = meeting.summary or "No summary available."
+        filename = f"{meeting.title}_summary.txt"
+    else:
+        content = meeting.transcript or "No transcript available."
+        filename = f"{meeting.title}_transcript.txt"
+
+    return PlainTextResponse(
+        content=content,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.delete("/{meeting_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_meeting(
     meeting_id: str,
@@ -470,10 +695,10 @@ async def retry_meeting_transcription(
             detail="Meeting not found"
         )
 
-    if meeting.status not in (MeetingStatus.FAILED, MeetingStatus.PROCESSING):
+    if meeting.status == MeetingStatus.PROCESSING:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only failed or stuck meetings can be retried"
+            detail="Meeting is already being processed"
         )
 
     if not meeting.recording_url:
@@ -482,10 +707,11 @@ async def retry_meeting_transcription(
             detail="No recording file found for this meeting"
         )
 
-    # Reset status
+    # Reset for reprocessing
     meeting.status = MeetingStatus.PROCESSING
     meeting.transcript = None
     meeting.summary = None
+    meeting.diarized_transcript = None
     await db.commit()
 
     # Re-queue background task
@@ -507,7 +733,7 @@ async def convert_action_item_to_task(
 
     Creates a new task from the action item and marks it as converted.
     """
-    from app.models import Task, TaskStatus, TaskPriority, TaskSourceType, Integration, IntegrationPlatform
+    from app.models import Task, TaskStatus, TaskPriority, TaskSourceType
 
     # Get action item
     result = await db.execute(
@@ -527,7 +753,7 @@ async def convert_action_item_to_task(
             detail="Action item does not belong to this meeting"
         )
 
-    if action_item.status == ActionItemStatus.CONVERTED:
+    if action_item.status.value == "converted":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Action item already converted to task"
@@ -535,10 +761,10 @@ async def convert_action_item_to_task(
 
     # Create task from action item
     new_task = Task(
-        title=action_item.description[:500],
+        title=action_item.description[:500],  # Truncate if needed
         description=action_item.description,
         status=TaskStatus.TODO,
-        priority=TaskPriority.MEDIUM,
+        priority=TaskPriority.MEDIUM,  # Default priority
         due_date=action_item.deadline_mentioned,
         team_id=current_user.team_id,
         created_by_id=current_user.id,
@@ -548,6 +774,7 @@ async def convert_action_item_to_task(
 
     # Try to assign to mentioned person
     if action_item.assignee_mentioned:
+        # Look up user by name or email
         result = await db.execute(
             select(User).where(
                 and_(
@@ -567,31 +794,12 @@ async def convert_action_item_to_task(
     await db.commit()
     await db.refresh(new_task)
 
-    # Mark action item as converted using the proper enum value
-    action_item.status = ActionItemStatus.CONVERTED
+    # Update action item status
+    action_item.status = "converted"
     action_item.task_id = new_task.id
     await db.commit()
 
-    # Queue Jira sync if user has an active Jira integration
-    try:
-        from app.tasks.integration_tasks import sync_task_to_jira
-        jira_q = await db.execute(
-            select(Integration).where(
-                Integration.user_id == current_user.id,
-                Integration.platform == IntegrationPlatform.JIRA,
-                Integration.is_active == True,
-            )
-        )
-        if jira_q.scalar_one_or_none():
-            sync_task_to_jira.delay(new_task.id, current_user.id)
-    except Exception:
-        pass  # Don't fail task creation if Jira sync can't be queued
-
-    return {
-        "task_id": new_task.id,
-        "task_title": new_task.title,
-        "message": "Action item converted to task successfully",
-    }
+    return {"task_id": new_task.id, "message": "Action item converted to task successfully"}
 
 
 @router.post("/{meeting_id}/action-items/{action_item_id}/reject", status_code=status.HTTP_200_OK)

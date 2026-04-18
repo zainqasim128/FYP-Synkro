@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     # Groq (FREE alternative - get key at https://console.groq.com/keys)
     GROQ_API_KEY: str = ""
 
+    # Speaker Diarization (optional — enables Tier 1 diarization)
+    # Get free token at: https://huggingface.co/settings/tokens
+    # Accept model license: https://huggingface.co/pyannote/speaker-diarization-3.1
+    HUGGINGFACE_TOKEN: str = ""
+
+    # AssemblyAI (optional — enables Tier 2 diarization, free tier: 5h/month)
+    ASSEMBLYAI_API_KEY: str = ""
+
     # AWS S3
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
@@ -67,6 +75,12 @@ class Settings(BaseSettings):
     SLACK_REDIRECT_URI: str = ""
     # Signing secret for Events API; used to verify incoming webhook signatures
     SLACK_SIGNING_SECRET: str = ""
+
+    # Zoom OAuth
+    ZOOM_CLIENT_ID: str = ""
+    ZOOM_CLIENT_SECRET: str = ""
+    ZOOM_REDIRECT_URI: str = "http://localhost:8000/api/integrations/zoom/callback"
+    ZOOM_WEBHOOK_SECRET_TOKEN: str = ""
 
     # Frontend URL (used for OAuth callback redirects)
     FRONTEND_URL: str = "http://localhost:3000"

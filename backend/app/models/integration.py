@@ -15,6 +15,7 @@ class IntegrationPlatform(str, enum.Enum):
     GOOGLE_CALENDAR = "google_calendar"
     JIRA = "jira"
     MICROSOFT_TEAMS = "microsoft_teams"
+    ZOOM = "zoom"
 
 
 class Integration(Base):

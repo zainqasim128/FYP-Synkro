@@ -19,6 +19,10 @@ class ActionItemResponse(ActionItemBase):
     task_id: Optional[str] = None
     meeting_id: Optional[str] = None
     created_at: datetime
+    # Speaker diarization fields
+    speaker_label: Optional[str] = None
+    assigned_by: Optional[str] = None
+    context_type: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -49,11 +53,18 @@ class MeetingUpdate(BaseModel):
     duration_minutes: Optional[int] = Field(None, ge=0)
 
 
+class SpeakerNamesUpdate(BaseModel):
+    """Schema for updating speaker display names"""
+    speaker_names: dict[str, str]
+
+
 class MeetingResponse(MeetingBase):
     """Schema for meeting response"""
     id: str
     recording_url: Optional[str] = None
     transcript: Optional[str] = None
+    diarized_transcript: Optional[str] = None  # JSON string of speaker-labeled segments
+    speaker_names: Optional[str] = None         # JSON string: {"Speaker A": "Alice"}
     summary: Optional[str] = None
     status: str
     team_id: str
@@ -61,6 +72,8 @@ class MeetingResponse(MeetingBase):
     created_at: datetime
     updated_at: Optional[datetime] = None
     action_items: List[ActionItemResponse] = []
+    zoom_meeting_id: Optional[str] = None
+    zoom_recording_id: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

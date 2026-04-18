@@ -55,27 +55,33 @@ def _get_chat_client():
 
 async def transcribe_meeting(audio_file_path: str) -> str:
     """
-    Transcribe audio file using Whisper API (Groq free or OpenAI paid).
-
-    Args:
-        audio_file_path: Path to the audio file
+    Transcribe audio file using Whisper API.
 
     Returns:
-        Formatted transcript with timestamps
+        Formatted transcript string with timestamps.
+    """
+    text, _ = await transcribe_meeting_with_segments(audio_file_path)
+    return text
+
+
+async def transcribe_meeting_with_segments(audio_file_path: str):
+    """
+    Transcribe audio file using Whisper API (Groq free or OpenAI paid).
+
+    Returns:
+        (formatted_transcript: str, whisper_segments: list)
+        whisper_segments is a list of {"start", "end", "text"} dicts — empty list if unavailable.
     """
     try:
         client, model = _get_transcription_client()
 
-        # Check file size
         file_size = os.path.getsize(audio_file_path)
         max_size = 25 * 1024 * 1024  # 25MB
-
         if file_size > max_size:
             raise ValueError(f"File size {file_size} exceeds maximum of {max_size} bytes")
 
         logger.info(f"Transcribing with {model} via {'Groq' if client == groq_client else 'OpenAI'}")
 
-        # Open and transcribe file
         with open(audio_file_path, "rb") as audio_file:
             transcript = await client.audio.transcriptions.create(
                 model=model,
@@ -84,17 +90,32 @@ async def transcribe_meeting(audio_file_path: str) -> str:
                 language="en",
             )
 
-        # Format transcript with timestamps if available
-        if hasattr(transcript, 'segments') and transcript.segments:
-            formatted_transcript = ""
-            for segment in transcript.segments:
-                start_time = segment.get('start', 0) if isinstance(segment, dict) else getattr(segment, 'start', 0)
-                text = segment.get('text', '') if isinstance(segment, dict) else getattr(segment, 'text', '')
-                formatted_transcript += f"[{format_timestamp(start_time)}] {text}\n"
-            return formatted_transcript.strip()
+        raw_segments = getattr(transcript, 'segments', None) or []
 
-        # Fallback to plain text
-        return transcript.text
+        # Normalise to plain dicts
+        whisper_segments = []
+        for seg in raw_segments:
+            if isinstance(seg, dict):
+                whisper_segments.append({
+                    "start": seg.get("start", 0),
+                    "end": seg.get("end", 0),
+                    "text": seg.get("text", "").strip(),
+                })
+            else:
+                whisper_segments.append({
+                    "start": getattr(seg, "start", 0),
+                    "end": getattr(seg, "end", 0),
+                    "text": getattr(seg, "text", "").strip(),
+                })
+
+        if whisper_segments:
+            lines = [
+                f"[{format_timestamp(s['start'])}] {s['text']}"
+                for s in whisper_segments if s["text"]
+            ]
+            return "\n".join(lines), whisper_segments
+
+        return transcript.text, []
 
     except Exception as e:
         raise Exception(f"Transcription failed: {str(e)}")

@@ -31,6 +31,7 @@ httpx==0.26.0
 
 # Date parsing & utility
 python-dateutil==2.8.2
+dateparser==1.2.0  # Natural language deadline parsing in meeting action items
 
 # Encryption helpers (Fernet)
 cryptography==41.0.3
@@ -53,6 +54,11 @@ email-validator==2.1.0
 
 # UUID support (commented out - causes build issues on Windows)
 # python-ulid==1.1.0
+
+# Optional: Speaker diarization (uncomment to enable)
+# pyannote.audio==3.3.2  # Tier 1: local diarization (needs HUGGINGFACE_TOKEN)
+# torch==2.3.0            # Required by pyannote.audio
+# assemblyai==0.31.0      # Tier 2: cloud diarization (needs ASSEMBLYAI_API_KEY)
 
 # Testing
 pytest==7.4.3

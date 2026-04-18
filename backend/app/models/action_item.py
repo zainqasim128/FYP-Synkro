@@ -26,6 +26,10 @@ class ActionItem(Base):
     confidence_score = Column(Float, default=0.0)  # AI confidence (0-1)
     status = Column(SQLEnum(ActionItemStatus), default=ActionItemStatus.PENDING, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Speaker diarization fields
+    speaker_label = Column(String(50), nullable=True)    # e.g. "Speaker A" — who said it
+    assigned_by = Column(String(255), nullable=True)     # speaker who assigned the task
+    context_type = Column(String(30), nullable=True)     # task_assignment|warning|completion|progress|question|decision
 
     # Foreign Keys
     meeting_id = Column(String(36), ForeignKey("meetings.id", ondelete="CASCADE"), nullable=True)
