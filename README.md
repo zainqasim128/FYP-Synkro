@@ -257,7 +257,8 @@ GROQ_API_KEY=gsk_...           # free alternative for summarisation and chat
 - [ ] **Real-time notifications** — notify team members when a meeting is processed, a task is assigned to them, or a deadline is approaching (WebSockets or SSE).
 - [ ] **Action item tracking UI** — extracted action items from meetings need their own page: list view, assign to team member, set due date, mark as done, link back to the source meeting.
 - [ ] **Task comments** — threaded comments on tasks so the team can discuss without leaving the platform.
-- [ ] **Slack integration** — connect a Slack workspace, post meeting summaries and task updates automatically.
+- [x] **Slack integration** — connect a Slack workspace, post meeting summaries and task updates automatically (OAuth flow, webhook processing & message sync).
+- [x] **Jira integration** — connect Jira Cloud using email/API token and sync tasks with issues.
 - [ ] **File attachments** — attach files to tasks and meetings.
 
 ### Auth & User Management

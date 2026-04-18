@@ -10,7 +10,7 @@ import os
 import logging
 
 from app.database import get_db
-from app.models import Meeting, User, ActionItem, MeetingStatus
+from app.models import Meeting, User, ActionItem, MeetingStatus, ActionItemStatus
 from app.schemas.meeting import MeetingResponse, MeetingUploadResponse, MeetingUpdate
 from app.dependencies import get_current_user, get_current_admin_user
 from app.utils.storage import get_storage
@@ -507,7 +507,7 @@ async def convert_action_item_to_task(
 
     Creates a new task from the action item and marks it as converted.
     """
-    from app.models import Task, TaskStatus, TaskPriority, TaskSourceType
+    from app.models import Task, TaskStatus, TaskPriority, TaskSourceType, Integration, IntegrationPlatform
 
     # Get action item
     result = await db.execute(
@@ -527,7 +527,7 @@ async def convert_action_item_to_task(
             detail="Action item does not belong to this meeting"
         )
 
-    if action_item.status.value == "converted":
+    if action_item.status == ActionItemStatus.CONVERTED:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Action item already converted to task"
@@ -535,10 +535,10 @@ async def convert_action_item_to_task(
 
     # Create task from action item
     new_task = Task(
-        title=action_item.description[:500],  # Truncate if needed
+        title=action_item.description[:500],
         description=action_item.description,
         status=TaskStatus.TODO,
-        priority=TaskPriority.MEDIUM,  # Default priority
+        priority=TaskPriority.MEDIUM,
         due_date=action_item.deadline_mentioned,
         team_id=current_user.team_id,
         created_by_id=current_user.id,
@@ -548,7 +548,6 @@ async def convert_action_item_to_task(
 
     # Try to assign to mentioned person
     if action_item.assignee_mentioned:
-        # Look up user by name or email
         result = await db.execute(
             select(User).where(
                 and_(
@@ -568,12 +567,31 @@ async def convert_action_item_to_task(
     await db.commit()
     await db.refresh(new_task)
 
-    # Update action item status
-    action_item.status = "converted"
+    # Mark action item as converted using the proper enum value
+    action_item.status = ActionItemStatus.CONVERTED
     action_item.task_id = new_task.id
     await db.commit()
 
-    return {"task_id": new_task.id, "message": "Action item converted to task successfully"}
+    # Queue Jira sync if user has an active Jira integration
+    try:
+        from app.tasks.integration_tasks import sync_task_to_jira
+        jira_q = await db.execute(
+            select(Integration).where(
+                Integration.user_id == current_user.id,
+                Integration.platform == IntegrationPlatform.JIRA,
+                Integration.is_active == True,
+            )
+        )
+        if jira_q.scalar_one_or_none():
+            sync_task_to_jira.delay(new_task.id, current_user.id)
+    except Exception:
+        pass  # Don't fail task creation if Jira sync can't be queued
+
+    return {
+        "task_id": new_task.id,
+        "task_title": new_task.title,
+        "message": "Action item converted to task successfully",
+    }
 
 
 @router.post("/{meeting_id}/action-items/{action_item_id}/reject", status_code=status.HTTP_200_OK)

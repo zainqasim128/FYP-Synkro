@@ -319,10 +319,100 @@ def process_message_for_intent(message_id: str):
             intent_data = asyncio.run(classify_intent(message.content))
             message.intent = intent_data["intent"]
 
-            # If it's a task request, extract entities
+            # If it's a task request, extract entities and create a real task
             if intent_data["intent"] == "task_request":
                 entities = asyncio.run(extract_task_entities(message.content))
                 message.entities = entities
+
+                # create internal Task record from entities (Slack messages only)
+                if message.platform == "slack":
+                    from app.models import Integration, IntegrationPlatform, Task, TaskStatus, TaskPriority, TaskSourceType
+                    from app.utils.security import decrypt_value
+                    from dateutil import parser as date_parser
+
+                    title = entities.get("title") or message.content[:100]
+                    description = entities.get("description")
+                    priority = entities.get("priority") or TaskPriority.MEDIUM
+                    due_date = None
+                    if entities.get("deadline"):
+                        try:
+                            due_date = date_parser.parse(entities.get("deadline"))
+                        except Exception:
+                            logger.warning("unable to parse deadline %s", entities.get("deadline"))
+
+                    # Look up the user separately — Message has no .user relationship
+                    from app.models.user import User as UserModel
+                    msg_user = db.execute(
+                        select(UserModel).where(UserModel.id == message.user_id)
+                    ).scalar_one_or_none()
+                    if msg_user is None or not msg_user.team_id:
+                        logger.warning(
+                            "Cannot create task from message %s: user %s has no team",
+                            message_id, message.user_id,
+                        )
+                        message.processed = True
+                        db.commit()
+                        return {"status": "skipped", "message_id": message_id, "reason": "no_team"}
+
+                    task = Task(
+                        title=title,
+                        description=description,
+                        priority=priority,
+                        due_date=due_date,
+                        source_type=TaskSourceType.MESSAGE,
+                        source_id=message.id,
+                        team_id=msg_user.team_id,
+                        created_by_id=message.user_id,
+                    )
+                    db.add(task)
+                    db.flush()  # get task.id
+
+                    # if user has an active Jira integration, sync immediately
+                    jira_integration = db.execute(
+                        select(Integration).where(
+                            Integration.user_id == message.user_id,
+                            Integration.platform == IntegrationPlatform.JIRA,
+                            Integration.is_active == True,
+                        )
+                    ).scalar_one_or_none()
+
+                    if jira_integration:
+                        try:
+                            from app.services.jira_service import JiraService, PRIORITY_MAP
+
+                            # Decrypt the stored API token before use
+                            raw_token = jira_integration.access_token
+                            try:
+                                raw_token = decrypt_value(raw_token)
+                            except Exception:
+                                pass  # fall back to raw if not encrypted
+
+                            jira = JiraService(
+                                domain=jira_integration.platform_metadata.get("domain"),
+                                email=jira_integration.platform_metadata.get("email"),
+                                api_token=raw_token,
+                            )
+                            # Map internal priority → Jira priority name
+                            jira_priority = PRIORITY_MAP.get(
+                                (task.priority.value if task.priority else "medium").lower(),
+                                "Medium",
+                            )
+                            jira_payload = asyncio.run(jira.create_issue(
+                                project_key=jira_integration.platform_metadata.get("project_key", "PROJ"),
+                                summary=task.title,
+                                description=task.description,
+                                priority=task.priority.value if task.priority else "medium",
+                                duedate=task.due_date.strftime("%Y-%m-%d") if task.due_date else None,
+                            ))
+                            task.external_id = jira_payload.get("id")
+                            logger.info(
+                                "Jira issue created for task %s: jira_id=%s key=%s",
+                                task.id,
+                                jira_payload.get("id"),
+                                jira_payload.get("key"),
+                            )
+                        except Exception as jerr:
+                            logger.error("Jira sync error for task %s: %s", task.id, jerr)
 
                 # Create action item if confidence is high enough
                 if entities.get("confidence", 0) > 0.6:

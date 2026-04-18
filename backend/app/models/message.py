@@ -30,6 +30,8 @@ class Message(Base):
     content = Column(Text, nullable=False)
     timestamp = Column(DateTime, nullable=False)
     thread_id = Column(String(255), nullable=True)  # For threading
+    channel_id = Column(String(255), nullable=True)   # Slack channel/DM channel ID
+    channel_type = Column(String(50), nullable=True)  # "channel", "im", "mpim", etc.
     processed = Column(Boolean, default=False, nullable=False)
     intent = Column(SQLEnum(MessageIntent), nullable=True)
     entities = Column(JSON, default=dict)  # Extracted entities

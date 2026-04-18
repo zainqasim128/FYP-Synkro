@@ -9,7 +9,7 @@ celery_app = Celery(
     "synkro",
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,
-    include=['app.tasks.meeting_tasks']  # Auto-discover tasks
+    include=['app.tasks.meeting_tasks', 'app.tasks.integration_tasks']  # Auto-discover tasks
 )
 
 # Celery configuration
@@ -24,6 +24,9 @@ celery_app.conf.update(
     task_soft_time_limit=25 * 60,  # 25 minutes soft limit
     worker_prefetch_multiplier=1,  # One task at a time
     worker_max_tasks_per_child=50,  # Restart worker after 50 tasks
+    # Run tasks synchronously in-process when broker is unavailable (dev mode)
+    task_always_eager=True,
+    task_eager_propagates=False,
 )
 
 # Task routing (optional - for organizing tasks)

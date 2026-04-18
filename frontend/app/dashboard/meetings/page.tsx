@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Upload, Video, FileAudio, X, Trash2, RotateCcw, Lock } from 'lucide-react'
-import { formatDateTime, formatRelativeTime, getStatusColor, formatFileSize } from '@/lib/utils'
+import { formatRelativeTime, getStatusColor, formatFileSize } from '@/lib/utils'
 import type { Meeting } from '@/types'
 import Link from 'next/link'
 
@@ -233,7 +233,7 @@ export default function MeetingsPage() {
             </p>
           </Card>
         ) : (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
             {meetings.map((meeting) => (
               <div key={meeting.id} className="relative group">
                 <Link

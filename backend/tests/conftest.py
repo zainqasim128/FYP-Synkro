@@ -28,10 +28,17 @@ def event_loop():
 @pytest_asyncio.fixture
 async def test_engine():
     """Create test database engine."""
+    # Use StaticPool for an in-memory SQLite database so that
+    # the same connection is reused across the session.  SQLite
+    # creates a new database for each connection when using
+    # ":memory:" which was causing "no such table" errors in
+    # fixtures that opened a fresh connection.
+    from sqlalchemy.pool import StaticPool
+
     engine = create_async_engine(
         TEST_DATABASE_URL,
         connect_args={"check_same_thread": False},
-        poolclass=NullPool,
+        poolclass=StaticPool,
     )
 
     async with engine.begin() as conn:

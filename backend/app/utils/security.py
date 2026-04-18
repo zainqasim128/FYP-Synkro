@@ -130,3 +130,34 @@ def decode_token(token: str) -> Optional[str]:
         return None
 
     return payload.get("sub")
+
+
+# ------------------------------------------------------------
+# helper utilities for encrypting sensitive data (OAuth tokens, API
+# credentials, etc.).  In production the FERNET_KEY should live in an
+# environment variable and be rotated periodically.
+
+try:
+    from cryptography.fernet import Fernet
+    from base64 import urlsafe_b64encode
+    import hashlib
+    # Generate a proper Fernet key from SECRET_KEY
+    key_material = hashlib.sha256(settings.SECRET_KEY.encode()).digest()
+    _fernet = Fernet(urlsafe_b64encode(key_material))
+except (ImportError, Exception):
+    _fernet = None
+
+
+def encrypt_value(plain: str) -> str:
+    """Encrypt a string for safe storage in the database."""
+    if not _fernet:
+        # fallback to storing plaintext (not recommended)
+        return plain
+    return _fernet.encrypt(plain.encode()).decode()
+
+
+def decrypt_value(cipher: str) -> str:
+    """Decrypt a value previously encrypted with :func:`encrypt_value`."""
+    if not _fernet:
+        return cipher
+    return _fernet.decrypt(cipher.encode()).decode()

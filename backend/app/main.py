@@ -9,8 +9,10 @@ from contextlib import asynccontextmanager
 
 from app.config import settings
 from app.database import init_db, close_db
-from app.routers import auth, tasks, meetings, chat, integrations, analytics, emails
+from app.routers import auth, tasks, meetings, chat, integrations, analytics, emails, messages
 from app.routers import admin
+from app.routers import slack_webhooks
+from app.routers import direct_messages
 
 # Lifespan context manager for startup and shutdown events
 @asynccontextmanager
@@ -54,7 +56,10 @@ async def lifespan(app: FastAPI):
     print("")
 
     # Initialize database - create tables on startup
-    await init_db()
+    try:
+        await init_db()
+    except Exception as e:
+        print(f"[!] DB init warning (non-fatal): {e}")
 
     yield
 
@@ -92,9 +97,12 @@ app.include_router(tasks.router)
 app.include_router(meetings.router)
 app.include_router(chat.router)
 app.include_router(integrations.router)
+app.include_router(slack_webhooks.router)  # Slack events webhook
 app.include_router(analytics.router)
 app.include_router(emails.router)
+app.include_router(messages.router)
 app.include_router(admin.router)
+app.include_router(direct_messages.router)
 
 # Root endpoint
 @app.get("/", tags=["Root"])
@@ -109,6 +117,7 @@ async def root():
         "docs": "/api/docs",
         "status": "operational"
     }
+
 
 
 # Health check endpoint

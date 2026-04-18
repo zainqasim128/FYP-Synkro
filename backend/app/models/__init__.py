@@ -10,6 +10,7 @@ from app.models.action_item import ActionItem, ActionItemStatus
 from app.models.integration import Integration, IntegrationPlatform
 from app.models.message import Message, MessageIntent
 from app.models.email import Email
+from app.models.direct_message import DirectMessage
 
 __all__ = [
     "Team",
@@ -29,4 +30,5 @@ __all__ = [
     "Message",
     "MessageIntent",
     "Email",
+    "DirectMessage",
 ]

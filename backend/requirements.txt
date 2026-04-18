@@ -29,6 +29,12 @@ celery==5.3.6
 # HTTP client
 httpx==0.26.0
 
+# Date parsing & utility
+python-dateutil==2.8.2
+
+# Encryption helpers (Fernet)
+cryptography==41.0.3
+
 # AI/ML
 openai==1.10.0
 

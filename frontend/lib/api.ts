@@ -2,6 +2,9 @@ import axios from 'axios'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
+console.log('🔍 API_URL:', API_URL)
+console.log('🔍 NEXT_PUBLIC_DEBUG:', process.env.NEXT_PUBLIC_DEBUG)
+
 const api = axios.create({
   baseURL: API_URL,
   timeout: 30000,
@@ -83,9 +86,11 @@ export const authApi = {
     api.post('/api/auth/register', data),
 
   login: (data: { email: string; password: string }) => {
+    console.log('🔍 Login attempt:', data)
     const form = new URLSearchParams()
     form.append('username', data.email)
     form.append('password', data.password)
+    console.log('🔍 Form data:', form.toString())
     return api.post('/api/auth/login', form, {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     })
@@ -169,13 +174,39 @@ export const emailApi = {
   seedDemo: () => api.post('/api/emails/seed-demo'),
 }
 
+// Messages (Slack) API
+export const messagesApi = {
+  getMessages: (params?: Record<string, any>) => api.get('/api/messages', { params }),
+  getStats: () => api.get('/api/messages/stats'),
+  getDmConversations: () => api.get('/api/messages/dms'),
+  getSlackUsers: () => api.get('/api/messages/dms/users'),
+  sendDm: (payload: { slack_user_id: string; message: string; channel_id?: string }) =>
+    api.post('/api/messages/dms/send', payload),
+}
+
 // Integrations API
 export const integrationsApi = {
   getIntegrations: () => api.get('/api/integrations'),
   connectGmail: (credentials: { email: string; app_password: string }) =>
     api.post('/api/integrations/gmail/connect', credentials),
+  startSlackOAuth: () => api.get('/api/integrations/slack/start'),
+  connectSlackDemo: () => api.post('/api/integrations/slack/demo-connect'),
+  connectJira: (credentials: { domain: string; email: string; api_token: string; project_key?: string }) =>
+    api.post('/api/integrations/jira/connect', credentials),
   disconnectIntegration: (id: string) => api.delete(`/api/integrations/${id}`),
   syncIntegration: (id: string) => api.post(`/api/integrations/${id}/sync`),
+}
+
+// Direct Messages API
+export const dmApi = {
+  getUsers: () => api.get('/api/dm/users'),
+  getConversations: () => api.get('/api/dm/conversations'),
+  getConversation: (userId: string) => api.get(`/api/dm/${userId}`),
+  sendMessage: (recipient_id: string, content: string) =>
+    api.post('/api/dm/send', { recipient_id, content }),
+  getUnreadCount: () => api.get<{ unread: number }>('/api/dm/unread-count'),
+  clearAllDms: () => api.delete('/api/dm/clear-all'),
+  deleteMessage: (messageId: string) => api.delete(`/api/dm/message/${messageId}`),
 }
 
 // Analytics API

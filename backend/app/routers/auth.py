@@ -136,6 +136,33 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
     )
 
     db.add(new_user)
+    await db.flush()  # get new_user.id before commit
+
+    # Auto-provision Slack integration for every new user (demo mode)
+    try:
+        import uuid as _uuid
+        from app.models import Integration, IntegrationPlatform
+        from app.utils.security import encrypt_value
+        from app.config import settings as _settings
+        _slack_token = _settings.DEMO_SLACK_TOKEN
+        if _slack_token:
+            _enc = encrypt_value(_slack_token)
+            _slack_int = Integration(
+                id=str(_uuid.uuid4()),
+                user_id=new_user.id,
+                platform=IntegrationPlatform.SLACK,
+                access_token=_enc,
+                is_active=True,
+                platform_metadata={
+                    "team_id": _settings.DEMO_SLACK_TEAM_ID,
+                    "team_name": "Synkro Workspace",
+                    "default_channel": "#general",
+                },
+            )
+            db.add(_slack_int)
+    except Exception:
+        pass  # Never block registration if Slack auto-provision fails
+
     await db.commit()
     await db.refresh(new_user)
 

@@ -434,7 +434,9 @@ User profile management and integration configuration.
 
 **Integrations section (all roles):**
 - Gmail: connect (enter email + app password), view connection status, see last sync time, disconnect
-- Other platforms listed as "coming soon" (Slack, Google Calendar, Jira, Microsoft Teams)
+- Slack: OAuth connection, view workspace/team, sync messages, disconnect
+- Jira: connect with domain/email/API token, optional project key, sync tasks, disconnect
+- Google Calendar & Microsoft Teams still "coming soon"
 
 **Admin panel section (admin only):**
 - Appears as an additional tab only for admin users

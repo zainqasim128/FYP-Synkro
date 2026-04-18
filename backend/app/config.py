@@ -65,6 +65,15 @@ class Settings(BaseSettings):
     SLACK_CLIENT_ID: str = ""
     SLACK_CLIENT_SECRET: str = ""
     SLACK_REDIRECT_URI: str = ""
+    # Signing secret for Events API; used to verify incoming webhook signatures
+    SLACK_SIGNING_SECRET: str = ""
+
+    # Frontend URL (used for OAuth callback redirects)
+    FRONTEND_URL: str = "http://localhost:3000"
+
+    # Demo: auto-provision Slack for every new registered user
+    DEMO_SLACK_TOKEN: str = ""
+    DEMO_SLACK_TEAM_ID: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",

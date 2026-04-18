@@ -35,9 +35,9 @@ DEFAULT_PASSWORD = "password123"  # All demo users share this password
 
 USERS = [
     {"full_name": "Alice Johnson", "email": "alice@synkro.dev", "role": UserRole.ADMIN},
-    {"full_name": "Bob Smith", "email": "bob@synkro.dev", "role": UserRole.MEMBER},
-    {"full_name": "Carol Williams", "email": "carol@synkro.dev", "role": UserRole.MEMBER},
-    {"full_name": "Dave Brown", "email": "dave@synkro.dev", "role": UserRole.MEMBER},
+    {"full_name": "Bob Smith", "email": "bob@synkro.dev", "role": UserRole.DEVELOPER},
+    {"full_name": "Carol Williams", "email": "carol@synkro.dev", "role": UserRole.DEVELOPER},
+    {"full_name": "Dave Brown", "email": "dave@synkro.dev", "role": UserRole.DEVELOPER},
 ]
 
 TASKS = [

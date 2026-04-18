@@ -8,7 +8,7 @@ import { Meeting, ActionItem } from '@/types'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { formatDate, formatDateTime } from '@/lib/utils'
+import { formatDateTime } from '@/lib/utils'
 import {
   ArrowLeft,
   Clock,
@@ -20,6 +20,7 @@ import {
   Mic,
   Sparkles,
   RotateCcw,
+  ExternalLink,
 } from 'lucide-react'
 
 const statusConfig: Record<string, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }> = {
@@ -37,6 +38,10 @@ export default function MeetingDetailPage() {
   const meetingId = params.id as string
 
   const [activeTab, setActiveTab] = useState<'summary' | 'transcript' | 'actions'>('summary')
+  // Track which action items are currently being converted / rejected
+  const [convertingIds, setConvertingIds] = useState<Set<string>>(new Set())
+  const [rejectingIds, setRejectingIds] = useState<Set<string>>(new Set())
+  const [convertedCount, setConvertedCount] = useState(0)
 
   const { data: meeting, isLoading, error } = useQuery<Meeting>({
     queryKey: ['meeting', meetingId],
@@ -53,16 +58,40 @@ export default function MeetingDetailPage() {
   const convertMutation = useMutation({
     mutationFn: (actionItemId: string) =>
       meetingApi.convertActionItem(meetingId, actionItemId),
+    onMutate: (actionItemId) => {
+      setConvertingIds((prev) => new Set(prev).add(actionItemId))
+    },
     onSuccess: () => {
+      setConvertedCount((c) => c + 1)
       queryClient.invalidateQueries({ queryKey: ['meeting', meetingId] })
+      queryClient.invalidateQueries({ queryKey: ['tasks'] })
+      queryClient.invalidateQueries({ queryKey: ['task-stats'] })
+      queryClient.invalidateQueries({ queryKey: ['recent-tasks'] })
+    },
+    onSettled: (_data, _err, actionItemId) => {
+      setConvertingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(actionItemId)
+        return next
+      })
     },
   })
 
   const rejectMutation = useMutation({
     mutationFn: (actionItemId: string) =>
       meetingApi.rejectActionItem(meetingId, actionItemId),
+    onMutate: (actionItemId) => {
+      setRejectingIds((prev) => new Set(prev).add(actionItemId))
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['meeting', meetingId] })
+    },
+    onSettled: (_data, _err, actionItemId) => {
+      setRejectingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(actionItemId)
+        return next
+      })
     },
   })
 
@@ -274,6 +303,25 @@ export default function MeetingDetailPage() {
           {/* Action Items Tab */}
           {activeTab === 'actions' && (
             <div className="space-y-4">
+              {/* Success banner */}
+              {convertedCount > 0 && (
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-green-200 bg-green-50 dark:bg-green-950 dark:border-green-800 px-4 py-3">
+                  <div className="flex items-center gap-2 text-sm text-green-800 dark:text-green-200">
+                    <CheckCircle2 className="h-4 w-4 shrink-0" />
+                    {convertedCount} task{convertedCount !== 1 ? 's' : ''} created successfully
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="shrink-0 border-green-300 text-green-800 hover:bg-green-100 dark:text-green-200 dark:border-green-700"
+                    onClick={() => router.push('/dashboard/tasks')}
+                  >
+                    <ExternalLink className="h-3 w-3 mr-1" />
+                    View Tasks
+                  </Button>
+                </div>
+              )}
+
               {/* Pending items */}
               {pendingItems.length > 0 && (
                 <Card>
@@ -290,8 +338,8 @@ export default function MeetingDetailPage() {
                         item={item}
                         onConvert={() => convertMutation.mutate(item.id)}
                         onReject={() => rejectMutation.mutate(item.id)}
-                        isConverting={convertMutation.isPending}
-                        isRejecting={rejectMutation.isPending}
+                        isConverting={convertingIds.has(item.id)}
+                        isRejecting={rejectingIds.has(item.id)}
                       />
                     ))}
                   </CardContent>
@@ -302,7 +350,7 @@ export default function MeetingDetailPage() {
               {convertedItems.length > 0 && (
                 <Card>
                   <CardHeader>
-                    <CardTitle className="text-lg text-green-700">
+                    <CardTitle className="text-lg text-green-700 dark:text-green-400">
                       Converted to Tasks ({convertedItems.length})
                     </CardTitle>
                   </CardHeader>
@@ -310,7 +358,7 @@ export default function MeetingDetailPage() {
                     {convertedItems.map((item) => (
                       <div
                         key={item.id}
-                        className="flex items-center gap-3 p-3 bg-green-50 rounded-lg"
+                        className="flex items-center gap-3 p-3 bg-green-50 dark:bg-green-950/40 rounded-lg"
                       >
                         <CheckCircle2 className="h-4 w-4 text-green-600 shrink-0" />
                         <span className="text-sm">{item.description}</span>

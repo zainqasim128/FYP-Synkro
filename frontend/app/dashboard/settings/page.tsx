@@ -12,7 +12,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Mail, Link2, Link2Off, RefreshCw, Loader2, CheckCircle2, XCircle,
-  AlertCircle, Users, Shield, UserCheck, UserX, Trash2
+  Users, Shield, UserCheck, UserX, Trash2
 } from 'lucide-react'
 import type { Integration, AdminUserStats, AdminTeamResponse, AdminTeamUser, UserRole } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
@@ -41,6 +41,11 @@ export default function SettingsPage() {
   const [showGmailForm, setShowGmailForm] = useState(false)
   const [gmailEmail, setGmailEmail] = useState('')
   const [gmailAppPassword, setGmailAppPassword] = useState('')
+  const [showJiraForm, setShowJiraForm] = useState(false)
+  const [jiraDomain, setJiraDomain] = useState('')
+  const [jiraEmail, setJiraEmail] = useState('')
+  const [jiraApiToken, setJiraApiToken] = useState('')
+  const [jiraProjectKey, setJiraProjectKey] = useState('')
 
   const isAdmin = user?.role === 'admin'
 
@@ -63,13 +68,15 @@ export default function SettingsPage() {
   }, [searchParams])
 
   // Fetch integrations
-  const { data: integrationsData, isLoading: integrationsLoading } = useQuery<{ data: Integration[] }>({
+  const { data: integrationsData } = useQuery<{ data: Integration[] }>({
     queryKey: ['integrations'],
     queryFn: () => integrationsApi.getIntegrations(),
   })
 
   const integrations = integrationsData?.data || []
   const gmailIntegration = integrations.find((i) => i.platform === 'gmail')
+  const slackIntegration = integrations.find((i) => i.platform === 'slack')
+  const jiraIntegration = integrations.find((i) => i.platform === 'jira')
 
   // Admin: Fetch user stats
   const { data: userStatsData, refetch: refetchUserStats } = useQuery<{ data: AdminUserStats }>({
@@ -128,18 +135,74 @@ export default function SettingsPage() {
     },
   })
 
-  // Disconnect mutation
-  const disconnectMutation = useMutation({
-    mutationFn: (integrationId: string) => integrationsApi.disconnectIntegration(integrationId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['integrations'] })
-      setIntegrationMessage({ type: 'success', text: 'Gmail disconnected' })
-      setTimeout(() => setIntegrationMessage(null), 3000)
+  // Slack OAuth start mutation
+  const startSlackOAuthMutation = useMutation({
+    mutationFn: () => integrationsApi.startSlackOAuth(),
+    onSuccess: (res: any) => {
+      // Redirect user to Slack authorization page
+      window.location.href = res.data.authorization_url
+    },
+    onError: (err: any) => {
+      setIntegrationMessage({
+        type: 'error',
+        text: err.response?.data?.detail || 'Failed to start Slack OAuth.',
+      })
+      setTimeout(() => setIntegrationMessage(null), 5000)
     },
   })
 
-  // Sync mutation
-  const syncMutation = useMutation({
+  // Jira connect mutation
+  const connectJiraMutation = useMutation({
+    mutationFn: (credentials: { domain: string; email: string; api_token: string; project_key?: string }) =>
+      integrationsApi.connectJira(credentials),
+    onSuccess: (response) => {
+      queryClient.invalidateQueries({ queryKey: ['integrations'] })
+      setIntegrationMessage({
+        type: 'success',
+        text: `Jira connected: ${response.data.message}`,
+      })
+      setShowJiraForm(false)
+      setJiraDomain('')
+      setJiraEmail('')
+      setJiraApiToken('')
+      setJiraProjectKey('')
+      setTimeout(() => setIntegrationMessage(null), 5000)
+    },
+    onError: (err: any) => {
+      setIntegrationMessage({
+        type: 'error',
+        text: err.response?.data?.detail || 'Failed to connect Jira. Check your credentials.',
+      })
+      setTimeout(() => setIntegrationMessage(null), 5000)
+    },
+  })
+
+  const [disconnectingId, setDisconnectingId] = useState<string | null>(null)
+
+  // Disconnect mutation — shared handler, tracks which integration is being removed
+  const disconnectMutation = useMutation({
+    mutationFn: ({ id }: { id: string; name: string }) => {
+      setDisconnectingId(id)
+      return integrationsApi.disconnectIntegration(id)
+    },
+    onSuccess: (_data, { name }) => {
+      setDisconnectingId(null)
+      queryClient.invalidateQueries({ queryKey: ['integrations'] })
+      setIntegrationMessage({ type: 'success', text: `${name} disconnected` })
+      setTimeout(() => setIntegrationMessage(null), 3000)
+    },
+    onError: (err: any, { name }) => {
+      setDisconnectingId(null)
+      setIntegrationMessage({
+        type: 'error',
+        text: err.response?.data?.detail || `Failed to disconnect ${name}. Please try again.`,
+      })
+      setTimeout(() => setIntegrationMessage(null), 5000)
+    },
+  })
+
+  // Gmail sync mutation
+  const gmailSyncMutation = useMutation({
     mutationFn: () => emailApi.syncEmails({ limit: 30, days: 7 }),
     onSuccess: (response) => {
       queryClient.invalidateQueries({ queryKey: ['integrations'] })
@@ -153,6 +216,23 @@ export default function SettingsPage() {
       setIntegrationMessage({
         type: 'error',
         text: err.response?.data?.detail || 'Sync failed. Check your Gmail connection.',
+      })
+      setTimeout(() => setIntegrationMessage(null), 5000)
+    },
+  })
+
+  // Generic integration sync (Slack/Jira)
+  const integrationSyncMutation = useMutation({
+    mutationFn: (id: string) => integrationsApi.syncIntegration(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['integrations'] })
+      setIntegrationMessage({ type: 'success', text: 'Sync triggered' })
+      setTimeout(() => setIntegrationMessage(null), 3000)
+    },
+    onError: (err: any) => {
+      setIntegrationMessage({
+        type: 'error',
+        text: err.response?.data?.detail || 'Sync failed',
       })
       setTimeout(() => setIntegrationMessage(null), 5000)
     },
@@ -234,7 +314,7 @@ export default function SettingsPage() {
 
   const handleDisconnect = (integrationId: string, name: string) => {
     if (confirm(`Are you sure you want to disconnect ${name}?`)) {
-      disconnectMutation.mutate(integrationId)
+      disconnectMutation.mutate({ id: integrationId, name })
     }
   }
 
@@ -600,11 +680,11 @@ export default function SettingsPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => syncMutation.mutate()}
-                        disabled={syncMutation.isPending}
+                        onClick={() => gmailSyncMutation.mutate()}
+                        disabled={gmailSyncMutation.isPending}
                         title="Sync now"
                       >
-                        {syncMutation.isPending ? (
+                        {gmailSyncMutation.isPending ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
                         ) : (
                           <RefreshCw className="h-4 w-4" />
@@ -614,11 +694,11 @@ export default function SettingsPage() {
                         variant="outline"
                         size="sm"
                         onClick={() => handleDisconnect(gmailIntegration.id, 'Gmail')}
-                        disabled={disconnectMutation.isPending}
+                        disabled={disconnectingId === gmailIntegration.id}
                         className="text-red-600 hover:text-red-700 hover:bg-red-50"
                         title="Disconnect"
                       >
-                        {disconnectMutation.isPending ? (
+                        {disconnectingId === gmailIntegration.id ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
                         ) : (
                           <Link2Off className="h-4 w-4" />
@@ -706,39 +786,259 @@ export default function SettingsPage() {
             </div>
 
             {/* Slack */}
-            <div className="flex items-center justify-between p-4 border rounded-lg opacity-60">
-              <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-lg bg-purple-100 dark:bg-purple-950 flex items-center justify-center">
-                  <svg className="h-5 w-5 text-purple-600" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z" />
-                  </svg>
+            <div className="border rounded-lg overflow-hidden">
+              <div className="flex items-center justify-between p-4">
+                <div className="flex items-center gap-3">
+                  <div className="h-10 w-10 rounded-lg bg-purple-100 dark:bg-purple-950 flex items-center justify-center">
+                    <svg className="h-5 w-5 text-purple-600" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <p className="font-medium">Slack</p>
+                    {slackIntegration ? (
+                      <div className="space-y-0.5">
+                        <p className="text-xs text-muted-foreground">
+                          Team: {slackIntegration.metadata?.team_id || 'Connected'}
+                        </p>
+                        {slackIntegration.last_synced_at && (
+                          <p className="text-xs text-muted-foreground">
+                            Last synced: {formatRelativeTime(slackIntegration.last_synced_at)}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Process messages and mentions
+                      </p>
+                    )}
+                  </div>
                 </div>
-                <div>
-                  <p className="font-medium">Slack</p>
-                  <p className="text-xs text-muted-foreground">
-                    Process messages and mentions
-                  </p>
+
+                <div className="flex items-center gap-2">
+                  {slackIntegration ? (
+                    <>
+                      <Badge variant="default" className="bg-green-600">
+                        <CheckCircle2 className="h-3 w-3 mr-1" />
+                        Connected
+                      </Badge>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => integrationSyncMutation.mutate(slackIntegration.id)}
+                        disabled={integrationSyncMutation.isPending}
+                        title="Sync now"
+                      >
+                        {integrationSyncMutation.isPending ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <RefreshCw className="h-4 w-4" />
+                        )}
+                      </Button>                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleDisconnect(slackIntegration.id, 'Slack')}
+                        disabled={disconnectingId === slackIntegration.id}
+                        className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                        title="Disconnect"
+                      >
+                        {disconnectingId === slackIntegration.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Link2Off className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      size="sm"
+                      onClick={() => startSlackOAuthMutation.mutate()}
+                      disabled={startSlackOAuthMutation.isPending}
+                    >
+                      {startSlackOAuthMutation.isPending ? (
+                        <><Loader2 className="h-4 w-4 animate-spin mr-1" /> Connecting...</>
+                      ) : (
+                        <>
+                          <Link2 className="h-4 w-4 mr-1" />
+                          Connect
+                        </>
+                      )}
+                    </Button>
+                  )}
                 </div>
               </div>
-              <Badge variant="outline">Coming Soon</Badge>
             </div>
 
             {/* Jira */}
-            <div className="flex items-center justify-between p-4 border rounded-lg opacity-60">
-              <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-lg bg-blue-100 dark:bg-blue-950 flex items-center justify-center">
-                  <svg className="h-5 w-5 text-blue-600" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M11.571 11.513H0a5.218 5.218 0 0 0 5.232 5.215h2.13v2.057A5.215 5.215 0 0 0 12.575 24V12.518a1.005 1.005 0 0 0-1.005-1.005zm5.723-5.756H5.736a5.215 5.215 0 0 0 5.215 5.214h2.129v2.058a5.218 5.218 0 0 0 5.215 5.214V6.758a1.001 1.001 0 0 0-1.001-1.001zM23.013 0H11.455a5.215 5.215 0 0 0 5.215 5.215h2.129v2.057A5.215 5.215 0 0 0 24.013 12.5V1.005A1.005 1.005 0 0 0 23.013 0z" />
-                  </svg>
+            <div className="border rounded-lg overflow-hidden">
+              <div className="flex items-center justify-between p-4">
+                <div className="flex items-center gap-3">
+                  <div className="h-10 w-10 rounded-lg bg-blue-100 dark:bg-blue-950 flex items-center justify-center">
+                    <svg className="h-5 w-5 text-blue-600" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M11.571 11.513H0a5.218 5.218 0 0 0 5.232 5.215h2.13v2.057A5.215 5.215 0 0 0 12.575 24V12.518a1.005 1.005 0 0 0-1.005-1.005zm5.723-5.756H5.736a5.215 5.215 0 0 0 5.215 5.214h2.129v2.058a5.218 5.218 0 0 0 5.215 5.214V6.758a1.001 1.001 0 0 0-1.001-1.001zM23.013 0H11.455a5.215 5.215 0 0 0 5.215 5.215h2.129v2.057A5.215 5.215 0 0 0 24.013 12.5V1.005A1.005 1.005 0 0 0 23.013 0z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <p className="font-medium">Jira</p>
+                    {jiraIntegration ? (
+                      <div className="space-y-0.5">
+                        <p className="text-xs text-muted-foreground">
+                          {jiraIntegration.metadata?.domain || 'Connected'}
+                        </p>
+                        {jiraIntegration.last_synced_at && (
+                          <p className="text-xs text-muted-foreground">
+                            Last synced: {formatRelativeTime(jiraIntegration.last_synced_at)}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Sync tasks with Jira issues
+                      </p>
+                    )}
+                  </div>
                 </div>
-                <div>
-                  <p className="font-medium">Jira</p>
-                  <p className="text-xs text-muted-foreground">
-                    Sync tasks with Jira issues
-                  </p>
+
+                <div className="flex items-center gap-2">
+                  {jiraIntegration ? (
+                    <>
+                      <Badge variant="default" className="bg-green-600">
+                        <CheckCircle2 className="h-3 w-3 mr-1" />
+                        Connected
+                      </Badge>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => integrationSyncMutation.mutate(jiraIntegration.id)}
+                        disabled={integrationSyncMutation.isPending}
+                        title="Sync now"
+                      >
+                        {integrationSyncMutation.isPending ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <RefreshCw className="h-4 w-4" />
+                        )}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleDisconnect(jiraIntegration.id, 'Jira')}
+                        disabled={disconnectingId === jiraIntegration.id}
+                        className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                        title="Disconnect"
+                      >
+                        {disconnectingId === jiraIntegration.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Link2Off className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant={showJiraForm ? 'outline' : 'default'}
+                      onClick={() => setShowJiraForm((v) => !v)}
+                    >
+                      {showJiraForm ? (
+                        'Cancel'
+                      ) : (
+                        <>
+                          <Link2 className="h-4 w-4 mr-1" />
+                          Connect
+                        </>
+                      )}
+                    </Button>
+                  )}
                 </div>
               </div>
-              <Badge variant="outline">Coming Soon</Badge>
+
+              {/* Credentials form — shown when not connected and user clicked Connect */}
+              {!jiraIntegration && showJiraForm && (
+                <div className="border-t bg-muted/30 px-4 py-4 space-y-3">
+                  <p className="text-xs text-muted-foreground">
+                    Enter your Jira Cloud domain, email, and{' '}
+                    <a
+                      href="https://id.atlassian.com/manage-profile/security/api-tokens"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline text-blue-600 dark:text-blue-400"
+                    >
+                      API token
+                    </a>
+                    . Your credentials are stored only for your account.
+                  </p>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="space-y-1">
+                      <Label htmlFor="jira-domain">Jira Domain</Label>
+                      <Input
+                        id="jira-domain"
+                        type="text"
+                        placeholder="yourcompany.atlassian.net"
+                        value={jiraDomain}
+                        onChange={(e) => setJiraDomain(e.target.value)}
+                        disabled={connectJiraMutation.isPending}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="jira-email">Email</Label>
+                      <Input
+                        id="jira-email"
+                        type="email"
+                        placeholder="you@company.com"
+                        value={jiraEmail}
+                        onChange={(e) => setJiraEmail(e.target.value)}
+                        disabled={connectJiraMutation.isPending}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="jira-api-token">API Token</Label>
+                      <Input
+                        id="jira-api-token"
+                        type="password"
+                        placeholder="ATATT3xFfGF0..."
+                        value={jiraApiToken}
+                        onChange={(e) => setJiraApiToken(e.target.value)}
+                        disabled={connectJiraMutation.isPending}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="jira-project-key">Project Key (Optional)</Label>
+                      <Input
+                        id="jira-project-key"
+                        type="text"
+                        placeholder="PROJ"
+                        value={jiraProjectKey}
+                        onChange={(e) => setJiraProjectKey(e.target.value)}
+                        disabled={connectJiraMutation.isPending}
+                      />
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      if (!jiraDomain.trim() || !jiraEmail.trim() || !jiraApiToken.trim()) {
+                        setIntegrationMessage({ type: 'error', text: 'Please enter domain, email and API token.' })
+                        setTimeout(() => setIntegrationMessage(null), 4000)
+                        return
+                      }
+                      connectJiraMutation.mutate({
+                        domain: jiraDomain.trim(),
+                        email: jiraEmail.trim(),
+                        api_token: jiraApiToken.trim(),
+                        project_key: jiraProjectKey.trim() || undefined
+                      })
+                    }}
+                    disabled={connectJiraMutation.isPending}
+                  >
+                    {connectJiraMutation.isPending ? (
+                      <><Loader2 className="h-4 w-4 animate-spin mr-1" /> Connecting...</>
+                    ) : (
+                      'Connect'
+                    )}
+                  </Button>
+                </div>
+              )}
             </div>
           </div>
         </CardContent>
