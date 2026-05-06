@@ -208,6 +208,7 @@ export const integrationsApi = {
   syncIntegration: (id: string) => api.post(`/api/integrations/${id}/sync`),
   startZoomOAuth: () => api.get('/api/integrations/zoom/start'),
   testZoomConnection: () => api.get('/api/integrations/zoom/test'),
+  checkGCalConfigured: () => api.get('/api/integrations/google-calendar/configured'),
   startGCalOAuth: () => api.get('/api/integrations/google-calendar/start'),
   testGCalConnection: () => api.get('/api/integrations/google-calendar/test'),
 }

@@ -1256,6 +1256,15 @@ class GCalTestResponse(BaseModel):
 
 
 @router.get(
+    "/google-calendar/configured",
+    summary="Check whether Google Calendar credentials are present in server config",
+)
+async def gcal_is_configured() -> dict:
+    """Returns {configured: bool} — no auth required, used to show/hide the Connect button."""
+    return {"configured": bool(settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET)}
+
+
+@router.get(
     "/google-calendar/start",
     response_model=GCalConnectResponse,
     summary="Start Google Calendar OAuth flow — returns authorization URL",
@@ -1266,8 +1275,8 @@ async def gcal_oauth_start(
     """Return the Google OAuth consent URL. Frontend should redirect the user there."""
     if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Google Calendar is not configured. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to .env",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google Calendar OAuth credentials are not configured on this server. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the backend .env file.",
         )
     url = gcal_module.GoogleCalendarService.get_authorization_url(state=current_user.id)
     return GCalConnectResponse(authorization_url=url)

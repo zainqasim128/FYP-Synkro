@@ -80,6 +80,14 @@ export default function SettingsPage() {
   const zoomIntegration = integrations.find((i) => i.platform === 'zoom')
   const gcalIntegration = integrations.find((i) => i.platform === 'google_calendar')
 
+  // Check if Google Calendar is configured on the server
+  const { data: gcalConfigData } = useQuery({
+    queryKey: ['gcal-configured'],
+    queryFn: () => integrationsApi.checkGCalConfigured().then((res) => res.data),
+    staleTime: 60_000,
+  })
+  const gcalServerConfigured = gcalConfigData?.configured ?? true
+
   // Admin: Fetch user stats
   const { data: userStatsData, refetch: refetchUserStats } = useQuery<{ data: AdminUserStats }>({
     queryKey: ['admin-user-stats'],
@@ -1238,7 +1246,7 @@ export default function SettingsPage() {
                         )}
                       </Button>
                     </>
-                  ) : (
+                  ) : gcalServerConfigured ? (
                     <Button
                       size="sm"
                       onClick={() => startGCalOAuthMutation.mutate()}
@@ -1253,6 +1261,16 @@ export default function SettingsPage() {
                         </>
                       )}
                     </Button>
+                  ) : (
+                    <div className="flex flex-col items-end gap-1">
+                      <Badge variant="outline" className="text-yellow-600 border-yellow-400 bg-yellow-50 dark:bg-yellow-950">
+                        <AlertCircle className="h-3 w-3 mr-1" />
+                        Setup Required
+                      </Badge>
+                      <p className="text-xs text-muted-foreground text-right max-w-[220px]">
+                        Add <code className="bg-muted px-1 rounded">GOOGLE_CLIENT_ID</code> &amp; <code className="bg-muted px-1 rounded">GOOGLE_CLIENT_SECRET</code> to <code className="bg-muted px-1 rounded">backend/.env</code>
+                      </p>
+                    </div>
                   )}
                 </div>
               </div>
