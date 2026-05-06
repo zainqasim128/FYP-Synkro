@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_SECRET: str = ""
     GOOGLE_REDIRECT_URI: str = ""
 
+    # Google Calendar OAuth
+    GOOGLE_CALENDAR_REDIRECT_URI: str = "http://localhost:8000/api/integrations/google-calendar/callback"
+
     # Slack OAuth
     SLACK_CLIENT_ID: str = ""
     SLACK_CLIENT_SECRET: str = ""

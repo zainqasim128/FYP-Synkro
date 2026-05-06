@@ -5,13 +5,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_
 from sqlalchemy.orm import selectinload
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
+import asyncio
 import tempfile
 import os
 import logging
 
 from app.database import get_db
-from app.models import Meeting, User, ActionItem, MeetingStatus
+from app.models import Meeting, User, ActionItem, MeetingStatus, Integration, IntegrationPlatform
 from app.schemas.meeting import MeetingResponse, MeetingUploadResponse, MeetingUpdate, SpeakerNamesUpdate
 from app.dependencies import get_current_user, get_current_admin_user
 from app.utils.storage import get_storage
@@ -131,13 +132,11 @@ async def process_meeting_background(meeting_id: str):
 
             # ── Context analysis ──────────────────────────────────────
             speakers = []
-            enriched_action_items = []
             if diarized_segments:
                 try:
                     analysis_result = await analyze_meeting_context(diarized_segments, meeting.title)
-                    enriched_segs = analysis_result.get("enriched_segments", diarized_segments)
+                    enriched_segs = analysis_result.get("segments", diarized_segments)
                     speakers = analysis_result.get("speakers", [])
-                    enriched_action_items = analysis_result.get("action_items", [])
                     meeting.diarized_transcript = _json.dumps(enriched_segs)
                     await db.commit()
                     logger.info(f"[Meeting {meeting_id}] Context analysis done — {len(speakers)} speakers")
@@ -150,7 +149,6 @@ async def process_meeting_background(meeting_id: str):
                 if diarized_segments and speakers:
                     summary_data = await generate_speaker_aware_summary(
                         diarized_transcript=meeting.transcript,
-                        enriched_action_items=enriched_action_items,
                         meeting_title=meeting.title,
                         speakers=speakers,
                     )
@@ -198,6 +196,119 @@ async def process_meeting_background(meeting_id: str):
             meeting.status = MeetingStatus.COMPLETED
             await db.commit()
             logger.info(f"[Meeting {meeting_id}] Complete — {created_count} action items")
+
+            # ── Google Calendar + Meet sync (fire-and-forget) ─────────────────────
+            if meeting.created_by_id:
+                try:
+                    from app.config import settings as _settings
+                    from app.models.calendar_preference import CalendarPreferences
+                    from app.services.google_calendar_service import GoogleCalendarService
+
+                    gcal_q = await db.execute(
+                        select(Integration).where(
+                            Integration.user_id == meeting.created_by_id,
+                            Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+                            Integration.is_active == True,
+                        )
+                    )
+                    gcal_int = gcal_q.scalar_one_or_none()
+
+                    if gcal_int:
+                        prefs_q = await db.execute(
+                            select(CalendarPreferences).where(
+                                CalendarPreferences.user_id == meeting.created_by_id
+                            )
+                        )
+                        prefs = prefs_q.scalar_one_or_none()
+
+                        if meeting.scheduled_at and (prefs is None or prefs.auto_sync_meetings):
+                            duration_min = meeting.duration_minutes or 60
+                            end_dt = meeting.scheduled_at + timedelta(minutes=duration_min)
+                            frontend_url = _settings.FRONTEND_URL or "http://localhost:3000"
+                            meeting_url = f"{frontend_url}/dashboard/meetings/{meeting.id}"
+                            summary_snippet = ""
+                            if meeting.summary:
+                                summary_snippet = (
+                                    meeting.summary[:300] + "..."
+                                    if len(meeting.summary) > 300
+                                    else meeting.summary
+                                )
+                            description = (
+                                f"{summary_snippet}\n\nView transcript: {meeting_url}"
+                                if summary_snippet
+                                else f"View transcript: {meeting_url}"
+                            )
+                            event_body = {
+                                "summary": f"[MEETING] {meeting.title}",
+                                "description": description,
+                                "start": {
+                                    "dateTime": meeting.scheduled_at.isoformat(),
+                                    "timeZone": "UTC",
+                                },
+                                "end": {
+                                    "dateTime": end_dt.isoformat(),
+                                    "timeZone": "UTC",
+                                },
+                                "reminders": {"useDefault": True},
+                                "conferenceData": {
+                                    "createRequest": {
+                                        "requestId": f"synkro-{meeting.id}",
+                                        "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                                    }
+                                },
+                            }
+                            gcal_params = {"conferenceDataVersion": 1}
+                            svc = GoogleCalendarService.from_integration(gcal_int)
+                            try:
+                                if meeting.calendar_event_id:
+                                    cal_result = await svc.update_event(
+                                        "primary",
+                                        meeting.calendar_event_id,
+                                        event_body,
+                                        params=gcal_params,
+                                    )
+                                else:
+                                    cal_result = await svc.create_event(
+                                        "primary", event_body, params=gcal_params
+                                    )
+                                # Google processes conferenceData asynchronously —
+                                # hangoutLink may be absent in the create response.
+                                if not cal_result.get("hangoutLink") and cal_result.get("id"):
+                                    await asyncio.sleep(2)
+                                    cal_result = await svc.get_event("primary", cal_result["id"])
+                                meeting.calendar_event_id = cal_result.get("id")
+                                meet_link = cal_result.get("hangoutLink")
+                                if meet_link:
+                                    meeting.google_meet_link = meet_link
+                                await db.commit()
+                                logger.info(
+                                    f"[Meeting {meeting_id}] Synced to Google Calendar "
+                                    f"event={meeting.calendar_event_id} meet={meet_link}"
+                                )
+                            finally:
+                                await svc.aclose()
+
+                        if prefs and prefs.auto_sync_actions:
+                            actions_q = await db.execute(
+                                select(ActionItem).where(
+                                    ActionItem.meeting_id == meeting_id,
+                                    ActionItem.deadline_mentioned.is_not(None),
+                                    ActionItem.calendar_event_id.is_(None),
+                                )
+                            )
+                            for item in actions_q.scalars().all():
+                                try:
+                                    from app.tasks.integration_tasks import sync_action_item_to_calendar
+                                    sync_action_item_to_calendar.delay(item.id, meeting.created_by_id)
+                                except Exception as item_err:
+                                    logger.warning(
+                                        f"[Meeting {meeting_id}] Action item {item.id} "
+                                        f"calendar sync enqueue failed: {item_err}"
+                                    )
+                except Exception as cal_err:
+                    logger.warning(
+                        f"[Meeting {meeting_id}] Calendar sync failed (non-fatal): {cal_err}"
+                    )
 
     except Exception as e:
         logger.error(f"[Meeting {meeting_id}] Processing failed: {str(e)}", exc_info=True)
@@ -522,13 +633,39 @@ async def update_meeting(
             detail="Meeting not found"
         )
 
-    # Update fields
+    # Track which fields changed before applying updates
+    calendar_relevant = {"scheduled_at", "title", "duration_minutes"}
     update_data = meeting_update.model_dump(exclude_unset=True)
+    old_scheduled_at = meeting.scheduled_at
+    calendar_fields_changed = bool(calendar_relevant & set(update_data.keys()))
+
     for field, value in update_data.items():
         setattr(meeting, field, value)
 
     await db.commit()
     await db.refresh(meeting)
+
+    # Sync to Google Calendar if meeting time/title changed, or if scheduled_at was
+    # just set for the first time (creates the initial calendar event with Meet link)
+    if calendar_fields_changed and meeting.scheduled_at:
+        try:
+            gcal_q = await db.execute(
+                select(Integration).where(
+                    Integration.user_id == current_user.id,
+                    Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+                    Integration.is_active == True,
+                )
+            )
+            gcal_int = gcal_q.scalar_one_or_none()
+            if gcal_int:
+                from app.tasks.integration_tasks import sync_meeting_to_calendar
+                sync_meeting_to_calendar.delay(meeting.id, current_user.id)
+                logger.info(
+                    "update_meeting: queued GCal sync for meeting %s (event %s)",
+                    meeting.id, meeting.calendar_event_id,
+                )
+        except Exception as exc:
+            logger.error("update_meeting: GCal sync failed for meeting %s: %s", meeting_id, exc)
 
     # Load relationships
     await db.refresh(meeting, ["action_items"])
@@ -545,13 +682,11 @@ async def update_speaker_names(
 ):
     """
     Persist custom display names for speakers in a meeting.
-    Also auto-assigns pending action items to matched team members.
 
     Accepts a mapping of generic labels to human names:
     {"Speaker A": "Alice", "Speaker B": "Bob"}
     """
     import json
-    from app.models import Task, TaskStatus, TaskPriority, TaskSourceType
 
     result = await db.execute(
         select(Meeting).where(
@@ -570,225 +705,11 @@ async def update_speaker_names(
         )
 
     meeting.speaker_names = json.dumps(body.speaker_names)
-
-    # Build reverse lookup: display name → speaker label
-    name_to_speaker = {v.strip().lower(): k for k, v in body.speaker_names.items() if v.strip()}
-
-    # Auto-assign pending action items when the mentioned name matches a mapped speaker's real name
-    pending_items = [ai for ai in meeting.action_items if ai.status.value == "pending"]
-    auto_created_task_ids: list[str] = []
-    for action_item in pending_items:
-        candidate_name = None
-
-        # Check if assignee_mentioned matches any display name
-        if action_item.assignee_mentioned:
-            candidate_name = action_item.assignee_mentioned.strip().lower()
-
-        # Fallback: check if speaker_label maps to a display name
-        if not candidate_name and action_item.speaker_label:
-            mapped = body.speaker_names.get(action_item.speaker_label, "")
-            if mapped.strip():
-                candidate_name = mapped.strip().lower()
-
-        if not candidate_name:
-            continue
-
-        # Find team member whose name matches
-        user_result = await db.execute(
-            select(User).where(
-                and_(
-                    User.team_id == current_user.team_id,
-                    or_(
-                        User.full_name.ilike(f"%{candidate_name}%"),
-                        User.email.ilike(f"%{candidate_name}%")
-                    )
-                )
-            )
-        )
-        assignee = user_result.scalar_one_or_none()
-        if not assignee:
-            continue
-
-        # Auto-create a task assigned to this person
-        new_task = Task(
-            title=action_item.description[:500],
-            description=action_item.description,
-            status=TaskStatus.TODO,
-            priority=TaskPriority.MEDIUM,
-            due_date=action_item.deadline_mentioned,
-            team_id=current_user.team_id,
-            created_by_id=current_user.id,
-            assignee_id=assignee.id,
-            source_type=TaskSourceType.MEETING,
-            source_id=meeting_id,
-        )
-        db.add(new_task)
-        await db.flush()  # get new_task.id
-
-        action_item.status = "converted"
-        action_item.task_id = new_task.id
-        auto_created_task_ids.append(str(new_task.id))
-
     await db.commit()
-
-    # Fire Slack notifications for newly auto-assigned tasks (best-effort)
-    if auto_created_task_ids:
-        try:
-            from app.tasks.integration_tasks import notify_slack_task_created
-            for task_id in auto_created_task_ids:
-                notify_slack_task_created.delay(task_id, str(current_user.id))
-        except Exception:
-            pass
-
     await db.refresh(meeting)
     await db.refresh(meeting, ["action_items"])
 
     return meeting
-
-
-@router.get("/{meeting_id}/pending-assignments")
-async def get_pending_assignments(
-    meeting_id: str,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Return pending action items for a meeting with speaker name suggestions
-    so the frontend can present an assignment popup.
-    """
-    result = await db.execute(
-        select(Meeting).where(
-            and_(
-                Meeting.id == meeting_id,
-                Meeting.team_id == current_user.team_id
-            )
-        ).options(selectinload(Meeting.action_items))
-    )
-    meeting = result.scalar_one_or_none()
-    if not meeting:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
-
-    import json
-    speaker_names: dict = {}
-    if meeting.speaker_names:
-        try:
-            speaker_names = json.loads(meeting.speaker_names)
-        except Exception:
-            pass
-
-    # Fetch team members for suggestions
-    members_result = await db.execute(
-        select(User).where(
-            and_(User.team_id == current_user.team_id, User.is_active == True)
-        )
-    )
-    members = members_result.scalars().all()
-    member_list = [{"id": str(m.id), "full_name": m.full_name, "email": m.email} for m in members]
-
-    pending = [ai for ai in meeting.action_items if ai.status.value == "pending"]
-    items = []
-    for ai in pending:
-        # Suggest an assignee based on assignee_mentioned or speaker_label mapping
-        suggested_id = None
-        candidate = None
-        if ai.assignee_mentioned:
-            candidate = ai.assignee_mentioned.strip().lower()
-        elif ai.speaker_label and ai.speaker_label in speaker_names:
-            candidate = speaker_names[ai.speaker_label].strip().lower()
-
-        if candidate:
-            for m in members:
-                if candidate in m.full_name.lower() or candidate in m.email.lower():
-                    suggested_id = str(m.id)
-                    break
-
-        items.append({
-            "id": str(ai.id),
-            "description": ai.description,
-            "assignee_mentioned": ai.assignee_mentioned,
-            "speaker_label": ai.speaker_label,
-            "speaker_display_name": speaker_names.get(ai.speaker_label or "", ai.speaker_label or ""),
-            "deadline_mentioned": ai.deadline_mentioned.isoformat() if ai.deadline_mentioned else None,
-            "confidence_score": ai.confidence_score,
-            "suggested_assignee_id": suggested_id,
-        })
-
-    return {
-        "meeting_id": meeting_id,
-        "meeting_title": meeting.title,
-        "pending_items": items,
-        "team_members": member_list,
-    }
-
-
-@router.post("/{meeting_id}/bulk-assign", status_code=status.HTTP_200_OK)
-async def bulk_assign_action_items(
-    meeting_id: str,
-    body: dict,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Convert multiple action items to tasks with explicit assignees.
-
-    Body: {"assignments": [{"action_item_id": "...", "assignee_id": "..."}]}
-    """
-    from app.models import Task, TaskStatus, TaskPriority, TaskSourceType
-
-    result = await db.execute(
-        select(Meeting).where(
-            and_(
-                Meeting.id == meeting_id,
-                Meeting.team_id == current_user.team_id
-            )
-        ).options(selectinload(Meeting.action_items))
-    )
-    meeting = result.scalar_one_or_none()
-    if not meeting:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
-
-    assignments = body.get("assignments", [])
-    created = []
-
-    for assignment in assignments:
-        action_item_id = assignment.get("action_item_id")
-        assignee_id = assignment.get("assignee_id")
-
-        action_item = next((ai for ai in meeting.action_items if str(ai.id) == action_item_id), None)
-        if not action_item or action_item.status.value == "converted":
-            continue
-
-        new_task = Task(
-            title=action_item.description[:500],
-            description=action_item.description,
-            status=TaskStatus.TODO,
-            priority=TaskPriority.MEDIUM,
-            due_date=action_item.deadline_mentioned,
-            team_id=current_user.team_id,
-            created_by_id=current_user.id,
-            assignee_id=assignee_id or None,
-            source_type=TaskSourceType.MEETING,
-            source_id=meeting_id,
-        )
-        db.add(new_task)
-        await db.flush()
-
-        action_item.status = "converted"
-        action_item.task_id = new_task.id
-        created.append(str(new_task.id))
-
-    await db.commit()
-
-    # Fire Slack notifications for each created task
-    if created:
-        try:
-            from app.tasks.integration_tasks import notify_slack_task_created
-            for task_id in created:
-                notify_slack_task_created.delay(task_id, str(current_user.id))
-        except Exception:
-            pass  # Notifications are best-effort
-
-    return {"created_task_ids": created, "count": len(created)}
 
 
 @router.get("/{meeting_id}/export", response_class=PlainTextResponse)
@@ -855,6 +776,28 @@ async def delete_meeting(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Meeting not found"
         )
+
+    # Delete associated Google Calendar event if one exists
+    if meeting.calendar_event_id:
+        try:
+            gcal_q = await db.execute(
+                select(Integration).where(
+                    Integration.user_id == current_user.id,
+                    Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+                    Integration.is_active == True,
+                )
+            )
+            gcal_int = gcal_q.scalar_one_or_none()
+            if gcal_int:
+                from app.services.google_calendar_service import GoogleCalendarService
+                svc = GoogleCalendarService.from_integration(gcal_int)
+                try:
+                    await svc.delete_event("primary", meeting.calendar_event_id)
+                    logger.info("delete_meeting: removed GCal event %s", meeting.calendar_event_id)
+                finally:
+                    await svc.aclose()
+        except Exception as exc:
+            logger.warning("delete_meeting: GCal event deletion failed: %s", exc)
 
     # Delete recording from storage
     if meeting.recording_url:
@@ -1054,6 +997,91 @@ async def reject_action_item(
     await db.commit()
 
     return {"message": "Action item rejected successfully"}
+
+
+@router.post("/{meeting_id}/generate-meet-link", response_model=MeetingResponse)
+async def generate_meet_link(
+    meeting_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create (or refresh) a Google Meet link for a meeting via Google Calendar."""
+    result = await db.execute(
+        select(Meeting).where(
+            and_(Meeting.id == meeting_id, Meeting.team_id == current_user.team_id)
+        )
+    )
+    meeting = result.scalar_one_or_none()
+    if not meeting:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+
+    gcal_q = await db.execute(
+        select(Integration).where(
+            Integration.user_id == current_user.id,
+            Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+            Integration.is_active == True,
+        )
+    )
+    gcal_int = gcal_q.scalar_one_or_none()
+    if not gcal_int:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google Calendar is not connected. Connect it in Settings first.",
+        )
+
+    from app.services.google_calendar_service import GoogleCalendarService
+    from app.config import settings as _settings
+
+    # Use scheduled_at if set, otherwise now + 1 h as a placeholder
+    start_dt = meeting.scheduled_at or datetime.utcnow()
+    duration_min = meeting.duration_minutes or 60
+    end_dt = start_dt + timedelta(minutes=duration_min)
+    frontend_url = _settings.FRONTEND_URL or "http://localhost:3000"
+    meeting_url = f"{frontend_url}/dashboard/meetings/{meeting.id}"
+
+    event_body = {
+        "summary": f"[MEETING] {meeting.title}",
+        "description": f"View in Synkro: {meeting_url}",
+        "start": {"dateTime": start_dt.isoformat(), "timeZone": "UTC"},
+        "end": {"dateTime": end_dt.isoformat(), "timeZone": "UTC"},
+        "reminders": {"useDefault": True},
+        "conferenceData": {
+            "createRequest": {
+                "requestId": f"synkro-{meeting.id}",
+                "conferenceSolutionKey": {"type": "hangoutsMeet"},
+            }
+        },
+    }
+    gcal_params = {"conferenceDataVersion": 1}
+    svc = GoogleCalendarService.from_integration(gcal_int)
+    try:
+        if meeting.calendar_event_id:
+            cal_result = await svc.update_event(
+                "primary", meeting.calendar_event_id, event_body, params=gcal_params
+            )
+        else:
+            cal_result = await svc.create_event("primary", event_body, params=gcal_params)
+
+        if not cal_result.get("hangoutLink") and cal_result.get("id"):
+            await asyncio.sleep(2)
+            cal_result = await svc.get_event("primary", cal_result["id"])
+
+        meeting.calendar_event_id = cal_result.get("id") or meeting.calendar_event_id
+        meet_link = cal_result.get("hangoutLink")
+        if meet_link:
+            meeting.google_meet_link = meet_link
+        await db.commit()
+    finally:
+        await svc.aclose()
+
+    if not meeting.google_meet_link:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Google Calendar created the event but did not return a Meet link. Try again in a moment.",
+        )
+
+    await db.refresh(meeting, ["action_items"])
+    return meeting
 
 
 @router.get("/whisper-status", status_code=status.HTTP_200_OK)

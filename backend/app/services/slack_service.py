@@ -395,6 +395,19 @@ class SlackService:
         )
         return resp.get("members", [])
 
+    async def join_channel(self, channel_id: str) -> bool:
+        """Join a public channel so the bot can read its history.
+
+        Returns True if joined (or already a member), False on error.
+        """
+        try:
+            await self._request(
+                "conversations.join", method="POST", json={"channel": channel_id}
+            )
+            return True
+        except Exception:
+            return False
+
     async def get_channel_info(self, channel_id: str) -> Dict[str, Any]:
         """Fetch channel metadata (requires ``channels:read`` scope).
 

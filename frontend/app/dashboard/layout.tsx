@@ -21,6 +21,7 @@ import {
   Sun,
   Shield,
   AtSign,
+  CalendarDays,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn, getInitials, getAvatarColor } from '@/lib/utils'
@@ -30,6 +31,7 @@ import { dmApi } from '@/lib/api'
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
   { name: 'Tasks', href: '/dashboard/tasks', icon: CheckSquare },
+  { name: 'Calendar', href: '/dashboard/calendar', icon: CalendarDays },
   { name: 'Meetings', href: '/dashboard/meetings', icon: Video },
   { name: 'Emails', href: '/dashboard/emails', icon: Mail },
   { name: 'Slack', href: '/dashboard/slack', icon: MessageSquare },

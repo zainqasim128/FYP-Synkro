@@ -55,6 +55,7 @@ class User(Base):
     )
     integrations = relationship("Integration", back_populates="user", cascade="all, delete-orphan")
     meetings_created = relationship("Meeting", back_populates="creator")
+    calendar_preferences = relationship("CalendarPreferences", back_populates="user", uselist=False, cascade="all, delete-orphan")
 
     @property
     def is_admin(self) -> bool:

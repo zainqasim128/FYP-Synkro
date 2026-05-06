@@ -134,10 +134,21 @@ async def slack_events(
     )
 
     if not integration:
-        logger.warning(
-            "Slack event received for unknown/inactive team_id=%s", team_id
-        )
-        return {"ok": True}
+        # Fallback for demo/single-workspace setups where DEMO_SLACK_TEAM_ID
+        # doesn't match the actual workspace (e.g. stale config).
+        if all_integrations:
+            integration = all_integrations[0]
+            logger.warning(
+                "Slack event team_id=%s not matched; falling back to integration user=%s",
+                team_id,
+                integration.user_id,
+            )
+        else:
+            logger.warning(
+                "Slack event received for unknown team_id=%s and no active integrations exist",
+                team_id,
+            )
+            return {"ok": True}
 
     # ── 5b. For DM channels, route to the Synkro user who owns the channel ─────
     channel_id_evt = event.get("channel")
@@ -278,7 +289,7 @@ async def slack_events(
             timestamp=datetime.utcfromtimestamp(ts_float),
             thread_id=event.get("thread_ts"),
             channel_id=event.get("channel"),
-            channel_type=event.get("channel_type"),
+            channel_type=event.get("channel_type") or "channel",
             user_id=party_intg.user_id,
             entities=entities,
         )

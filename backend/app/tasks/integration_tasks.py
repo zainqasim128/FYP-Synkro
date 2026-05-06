@@ -20,8 +20,10 @@ escalating back-off (60s, 120s, 180s).
 
 import asyncio
 import logging
+from datetime import datetime, timedelta
 from typing import Optional
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.engine import create_engine
 from sqlalchemy.orm import Session
@@ -295,3 +297,352 @@ def notify_slack_task_created(
                     task_id,
                 )
                 return {"error": str(exc), "task_id": task_id}
+
+
+# ── Google Calendar sync ───────────────────────────────────────────────────────
+
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.integration_tasks.sync_task_to_calendar",
+    max_retries=3,
+    default_retry_delay=60,
+)
+def sync_task_to_calendar(self, task_id: str, user_id: str) -> dict:
+    """Create or update a Google Calendar event for a task with a due date."""
+    from app.models.user import User as UserModel
+    from app.services.google_calendar_service import GoogleCalendarService
+
+    with Session(_sync_engine) as db:
+        task = db.execute(select(Task).where(Task.id == task_id)).scalar_one_or_none()
+        if not task:
+            return {"error": "task_not_found", "task_id": task_id}
+        if not task.due_date:
+            return {"skipped": "no_due_date", "task_id": task_id}
+
+        gcal_int = db.execute(
+            select(Integration).where(
+                Integration.user_id == user_id,
+                Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+                Integration.is_active == True,
+            )
+        ).scalar_one_or_none()
+        if not gcal_int:
+            return {"skipped": "no_gcal_integration"}
+
+        assignee_name = "Unassigned"
+        if task.assignee_id:
+            assignee = db.execute(select(UserModel).where(UserModel.id == task.assignee_id)).scalar_one_or_none()
+            if assignee:
+                assignee_name = assignee.full_name
+
+        cal_owner = db.execute(select(UserModel).where(UserModel.id == user_id)).scalar_one_or_none()
+        user_timezone = (cal_owner.timezone if cal_owner and hasattr(cal_owner, 'timezone') and cal_owner.timezone else "UTC")
+
+        event_body = GoogleCalendarService.task_to_event(task, assignee_name, settings.FRONTEND_URL, user_timezone=user_timezone)
+        existing_event_id = task.calendar_event_id
+
+        async def _do_sync() -> dict:
+            svc = GoogleCalendarService.from_integration(gcal_int)
+            try:
+                if existing_event_id:
+                    try:
+                        return await svc.update_event("primary", existing_event_id, event_body)
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 404:
+                            return await svc.create_event("primary", event_body)
+                        raise
+                else:
+                    return await svc.create_event("primary", event_body)
+            finally:
+                await svc.aclose()
+
+        try:
+            result = asyncio.run(_do_sync())
+            task.calendar_event_id = result.get("id")
+            task.calendar_synced_at = datetime.utcnow()
+            db.commit()
+            return {"synced": task.calendar_event_id}
+        except Exception as exc:
+            logger.error("sync_task_to_calendar: failed for task %s: %s", task_id, exc)
+            try:
+                raise self.retry(exc=exc, countdown=60 * (self.request.retries + 1))
+            except self.MaxRetriesExceededError:
+                return {"error": str(exc), "task_id": task_id}
+
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.integration_tasks.delete_calendar_event",
+    max_retries=2,
+    default_retry_delay=30,
+)
+def delete_calendar_event(self, calendar_event_id: str, user_id: str, task_id: Optional[str] = None) -> dict:
+    """Delete a Google Calendar event and clear calendar_event_id on the task."""
+    from app.services.google_calendar_service import GoogleCalendarService
+
+    with Session(_sync_engine) as db:
+        gcal_int = db.execute(
+            select(Integration).where(
+                Integration.user_id == user_id,
+                Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+                Integration.is_active == True,
+            )
+        ).scalar_one_or_none()
+        if not gcal_int:
+            return {"skipped": "no_gcal_integration"}
+
+        async def _do_delete() -> None:
+            svc = GoogleCalendarService.from_integration(gcal_int)
+            try:
+                await svc.delete_event("primary", calendar_event_id)
+            finally:
+                await svc.aclose()
+
+        try:
+            asyncio.run(_do_delete())
+            if task_id:
+                task = db.execute(select(Task).where(Task.id == task_id)).scalar_one_or_none()
+                if task:
+                    task.calendar_event_id = None
+                    task.calendar_synced_at = None
+                    db.commit()
+            return {"deleted": calendar_event_id}
+        except Exception as exc:
+            try:
+                raise self.retry(exc=exc, countdown=30 * (self.request.retries + 1))
+            except self.MaxRetriesExceededError:
+                return {"error": str(exc), "event_id": calendar_event_id}
+
+
+# ── Meeting calendar sync ──────────────────────────────────────────────────────
+
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.integration_tasks.sync_meeting_to_calendar",
+    max_retries=2,
+    default_retry_delay=60,
+)
+def sync_meeting_to_calendar(self, meeting_id: str, user_id: str) -> dict:
+    """Create or update a Google Calendar event for a meeting (with Google Meet link)."""
+    from app.models.meeting import Meeting
+    from app.services.google_calendar_service import GoogleCalendarService
+
+    with Session(_sync_engine) as db:
+        meeting = db.execute(select(Meeting).where(Meeting.id == meeting_id)).scalar_one_or_none()
+        if not meeting:
+            return {"error": "meeting_not_found"}
+        if not meeting.scheduled_at:
+            return {"skipped": "no_scheduled_at"}
+
+        gcal_int = db.execute(
+            select(Integration).where(
+                Integration.user_id == user_id,
+                Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+                Integration.is_active == True,
+            )
+        ).scalar_one_or_none()
+        if not gcal_int:
+            return {"skipped": "no_gcal_integration"}
+
+        duration_min = meeting.duration_minutes or 60
+        end_dt = meeting.scheduled_at + timedelta(minutes=duration_min)
+        meeting_url = f"{settings.FRONTEND_URL}/dashboard/meetings/{meeting.id}"
+        summary_snippet = (meeting.summary[:300] + "...") if meeting.summary and len(meeting.summary) > 300 else (meeting.summary or "")
+        description = f"{summary_snippet}\n\nView transcript: {meeting_url}" if summary_snippet else f"View transcript: {meeting_url}"
+
+        event_body = {
+            "summary": f"[MEETING] {meeting.title}",
+            "description": description,
+            "start": {"dateTime": meeting.scheduled_at.isoformat(), "timeZone": "UTC"},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": "UTC"},
+            "reminders": {"useDefault": True},
+            "conferenceData": {
+                "createRequest": {
+                    "requestId": f"synkro-{meeting_id}",
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                }
+            },
+        }
+
+        existing_event_id = meeting.calendar_event_id
+
+        async def _do_sync() -> dict:
+            svc = GoogleCalendarService.from_integration(gcal_int)
+            gcal_params = {"conferenceDataVersion": 1}
+            try:
+                if existing_event_id:
+                    try:
+                        result = await svc.update_event("primary", existing_event_id, event_body, params=gcal_params)
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 404:
+                            result = await svc.create_event("primary", event_body, params=gcal_params)
+                        else:
+                            raise
+                else:
+                    result = await svc.create_event("primary", event_body, params=gcal_params)
+                if not result.get("hangoutLink") and result.get("id"):
+                    await asyncio.sleep(2)
+                    result = await svc.get_event("primary", result["id"])
+                return result
+            finally:
+                await svc.aclose()
+
+        try:
+            result = asyncio.run(_do_sync())
+            meeting.calendar_event_id = result.get("id")
+            meet_link = result.get("hangoutLink")
+            if meet_link:
+                meeting.google_meet_link = meet_link
+            db.commit()
+            return {"synced": meeting.calendar_event_id, "meet_link": meet_link}
+        except Exception as exc:
+            logger.error("sync_meeting_to_calendar: failed for meeting %s: %s", meeting_id, exc)
+            try:
+                raise self.retry(exc=exc, countdown=60 * (self.request.retries + 1))
+            except self.MaxRetriesExceededError:
+                return {"error": str(exc), "meeting_id": meeting_id}
+
+
+# ── Action item calendar sync ──────────────────────────────────────────────────
+
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.integration_tasks.sync_action_item_to_calendar",
+    max_retries=2,
+    default_retry_delay=60,
+)
+def sync_action_item_to_calendar(self, action_item_id: str, user_id: str) -> dict:
+    """Create a Google Calendar event for an action item that has a deadline."""
+    from app.models.action_item import ActionItem
+    from app.services.google_calendar_service import GoogleCalendarService
+
+    with Session(_sync_engine) as db:
+        item = db.execute(select(ActionItem).where(ActionItem.id == action_item_id)).scalar_one_or_none()
+        if not item:
+            return {"error": "action_item_not_found"}
+        if not item.deadline_mentioned:
+            return {"skipped": "no_deadline"}
+        if item.calendar_event_id:
+            return {"skipped": "already_synced", "event_id": item.calendar_event_id}
+
+        gcal_int = db.execute(
+            select(Integration).where(
+                Integration.user_id == user_id,
+                Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+                Integration.is_active == True,
+            )
+        ).scalar_one_or_none()
+        if not gcal_int:
+            return {"skipped": "no_gcal_integration"}
+
+        deadline_date = item.deadline_mentioned.strftime("%Y-%m-%d")
+        next_day = (item.deadline_mentioned + timedelta(days=1)).strftime("%Y-%m-%d")
+        meeting_ref = f"\nSource meeting: {settings.FRONTEND_URL}/dashboard/meetings/{item.meeting_id}" if item.meeting_id else ""
+        event_body = {
+            "summary": f"[ACTION] {item.description[:80]}",
+            "description": f"Action item extracted from meeting.{meeting_ref}",
+            "start": {"date": deadline_date},
+            "end": {"date": next_day},
+            "reminders": {"useDefault": False, "overrides": [{"method": "email", "minutes": 1440}]},
+        }
+
+        async def _do_sync() -> dict:
+            svc = GoogleCalendarService.from_integration(gcal_int)
+            try:
+                return await svc.create_event("primary", event_body)
+            finally:
+                await svc.aclose()
+
+        try:
+            result = asyncio.run(_do_sync())
+            item.calendar_event_id = result.get("id")
+            db.commit()
+            return {"synced": item.calendar_event_id}
+        except Exception as exc:
+            try:
+                raise self.retry(exc=exc, countdown=60 * (self.request.retries + 1))
+            except self.MaxRetriesExceededError:
+                return {"error": str(exc), "action_item_id": action_item_id}
+
+
+# ── Overdue task rescheduler ───────────────────────────────────────────────────
+
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.integration_tasks.reschedule_overdue_tasks",
+    max_retries=1,
+    default_retry_delay=300,
+)
+def reschedule_overdue_tasks(self) -> dict:
+    """Move overdue task calendar events to today for opted-in users.
+
+    Runs daily at 07:00 UTC via Celery beat.
+    Only acts on users with auto_reschedule_overdue=True in CalendarPreferences.
+    """
+    from app.models.calendar_preference import CalendarPreferences
+    from app.services.google_calendar_service import GoogleCalendarService
+
+    today = datetime.utcnow().date()
+    today_str = today.strftime("%Y-%m-%d")
+    tomorrow_str = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+    moved = 0
+    skipped = 0
+
+    with Session(_sync_engine) as db:
+        opted_in = db.execute(
+            select(CalendarPreferences).where(CalendarPreferences.auto_reschedule_overdue == True)
+        ).scalars().all()
+
+        for prefs in opted_in:
+            try:
+                gcal_int = db.execute(
+                    select(Integration).where(
+                        Integration.user_id == prefs.user_id,
+                        Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+                        Integration.is_active == True,
+                    )
+                ).scalar_one_or_none()
+                if not gcal_int:
+                    skipped += 1
+                    continue
+
+                overdue_tasks = db.execute(
+                    select(Task).where(
+                        Task.assignee_id == prefs.user_id,
+                        Task.due_date < datetime.utcnow(),
+                        Task.status != "done",
+                        Task.calendar_event_id.is_not(None),
+                    )
+                ).scalars().all()
+
+                if not overdue_tasks:
+                    continue
+
+                async def _move_events(tasks=overdue_tasks, integration=gcal_int) -> int:
+                    svc = GoogleCalendarService.from_integration(integration)
+                    count = 0
+                    try:
+                        for task in tasks:
+                            try:
+                                await svc.update_event("primary", task.calendar_event_id, {
+                                    "start": {"date": today_str},
+                                    "end": {"date": tomorrow_str},
+                                })
+                                count += 1
+                            except Exception as exc:
+                                logger.warning("reschedule_overdue_tasks: skipped task %s: %s", task.id, exc)
+                    finally:
+                        await svc.aclose()
+                    return count
+
+                moved += asyncio.run(_move_events())
+
+            except Exception as exc:
+                logger.error("reschedule_overdue_tasks: failed for user %s: %s", prefs.user_id, exc)
+
+    logger.info("reschedule_overdue_tasks: moved=%d skipped=%d", moved, skipped)
+    return {"moved": moved, "skipped": skipped}

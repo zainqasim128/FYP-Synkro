@@ -56,6 +56,21 @@ class TaskUpdate(BaseModel):
         return v
 
 
+class UserBrief(BaseModel):
+    id: str
+    full_name: str
+    email: str
+    avatar_url: Optional[str] = None
+    model_config = {"from_attributes": True}
+
+
+class CreatorBrief(BaseModel):
+    id: str
+    full_name: str
+    email: str
+    model_config = {"from_attributes": True}
+
+
 class TaskResponse(TaskBase):
     """Schema for task response"""
     id: str
@@ -65,12 +80,14 @@ class TaskResponse(TaskBase):
     source_type: str
     source_id: Optional[str] = None
     external_id: Optional[str] = None
+    calendar_event_id: Optional[str] = None
+    calendar_synced_at: Optional[datetime] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
     # Optional nested objects
-    assignee: Optional[dict] = None
-    creator: Optional[dict] = None
+    assignee: Optional[UserBrief] = None
+    creator: Optional[CreatorBrief] = None
 
     model_config = {"from_attributes": True}
 

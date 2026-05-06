@@ -1,9 +1,9 @@
 'use client'
 
-import { useState, useEffect, Suspense } from 'react'
+import { useState, useEffect } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { authApi, integrationsApi, emailApi, adminApi } from '@/lib/api'
+import { authApi, integrationsApi, emailApi, adminApi, calendarApi } from '@/lib/api'
 import { useAuthStore } from '@/lib/stores/authStore'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
@@ -12,8 +12,9 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Mail, Link2, Link2Off, RefreshCw, Loader2, CheckCircle2, XCircle,
-  AlertCircle, Users, Shield, UserCheck, UserX, Trash2
+  AlertCircle, Users, Shield, UserCheck, UserX, Trash2, Calendar, ChevronDown, ChevronUp
 } from 'lucide-react'
+import { Switch } from '@/components/ui/switch'
 import type { Integration, AdminUserStats, AdminTeamResponse, AdminTeamUser, UserRole } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
 import { ROLE_LABELS } from '@/types'
@@ -27,7 +28,7 @@ const ROLE_OPTIONS: { value: UserRole; label: string }[] = [
   { value: 'intern', label: 'Intern' },
 ]
 
-function SettingsPageContent() {
+export default function SettingsPage() {
   const queryClient = useQueryClient()
   const searchParams = useSearchParams()
   const { user, fetchUser } = useAuthStore()
@@ -46,6 +47,7 @@ function SettingsPageContent() {
   const [jiraEmail, setJiraEmail] = useState('')
   const [jiraApiToken, setJiraApiToken] = useState('')
   const [jiraProjectKey, setJiraProjectKey] = useState('')
+  const [showGCalPrefs, setShowGCalPrefs] = useState(false)
 
   const isAdmin = user?.role === 'admin'
 
@@ -68,16 +70,15 @@ function SettingsPageContent() {
   }, [searchParams])
 
   // Fetch integrations
-  const { data: integrationsData, isLoading: integrationsLoading } = useQuery<{ data: Integration[] }>({
+  const { data: integrations = [], isLoading: integrationsLoading } = useQuery<Integration[]>({
     queryKey: ['integrations'],
-    queryFn: () => integrationsApi.getIntegrations(),
+    queryFn: () => integrationsApi.getIntegrations().then((res) => res.data),
   })
-
-  const integrations = integrationsData?.data || []
   const gmailIntegration = integrations.find((i) => i.platform === 'gmail')
   const slackIntegration = integrations.find((i) => i.platform === 'slack')
   const jiraIntegration = integrations.find((i) => i.platform === 'jira')
   const zoomIntegration = integrations.find((i) => i.platform === 'zoom')
+  const gcalIntegration = integrations.find((i) => i.platform === 'google_calendar')
 
   // Admin: Fetch user stats
   const { data: userStatsData, refetch: refetchUserStats } = useQuery<{ data: AdminUserStats }>({
@@ -223,6 +224,59 @@ function SettingsPageContent() {
         type: 'error',
         text: err.response?.data?.detail || 'Failed to start Zoom OAuth.',
       })
+      setTimeout(() => setIntegrationMessage(null), 5000)
+    },
+  })
+
+  // Google Calendar OAuth start
+  const startGCalOAuthMutation = useMutation({
+    mutationFn: () => integrationsApi.startGCalOAuth(),
+    onSuccess: (response) => {
+      const url = response.data?.authorization_url
+      if (url) {
+        window.location.href = url
+      }
+    },
+    onError: (err: any) => {
+      setIntegrationMessage({
+        type: 'error',
+        text: err.response?.data?.detail || 'Failed to start Google Calendar OAuth.',
+      })
+      setTimeout(() => setIntegrationMessage(null), 5000)
+    },
+  })
+
+  // Calendar preferences query (only fetch when GCal is connected)
+  const { data: gcalPrefsData, refetch: refetchGCalPrefs } = useQuery({
+    queryKey: ['calendar-preferences'],
+    queryFn: () => calendarApi.getPreferences(),
+    enabled: !!gcalIntegration,
+    select: (res: any) => res.data,
+  })
+  const gcalPrefs = gcalPrefsData
+
+  const updateGCalPrefsMutation = useMutation({
+    mutationFn: (prefs: Record<string, any>) => calendarApi.updatePreferences(prefs),
+    onSuccess: () => {
+      refetchGCalPrefs()
+      setIntegrationMessage({ type: 'success', text: 'Calendar preferences saved.' })
+      setTimeout(() => setIntegrationMessage(null), 3000)
+    },
+    onError: (err: any) => {
+      setIntegrationMessage({ type: 'error', text: err.response?.data?.detail || 'Failed to save preferences.' })
+      setTimeout(() => setIntegrationMessage(null), 5000)
+    },
+  })
+
+  const syncAllTasksMutation = useMutation({
+    mutationFn: () => calendarApi.syncAllTasks(),
+    onSuccess: (res: any) => {
+      const msg = res.data?.message || 'Sync queued!'
+      setIntegrationMessage({ type: 'success', text: msg })
+      setTimeout(() => setIntegrationMessage(null), 4000)
+    },
+    onError: (err: any) => {
+      setIntegrationMessage({ type: 'error', text: err.response?.data?.detail || 'Sync failed.' })
       setTimeout(() => setIntegrationMessage(null), 5000)
     },
   })
@@ -447,7 +501,9 @@ function SettingsPageContent() {
                   <option value="Europe/Paris">Paris</option>
                   <option value="Asia/Tokyo">Tokyo</option>
                   <option value="Asia/Shanghai">Shanghai</option>
-                  <option value="Asia/Dubai">Dubai</option>
+                  <option value="Asia/Karachi">Karachi / Pakistan (UTC+5)</option>
+                  <option value="Asia/Kolkata">India (UTC+5:30)</option>
+                  <option value="Asia/Dubai">Dubai (UTC+4)</option>
                   <option value="Australia/Sydney">Sydney</option>
                 </select>
               </div>
@@ -1118,6 +1174,249 @@ function SettingsPageContent() {
                 </div>
               </div>
             </div>
+
+            {/* Google Calendar */}
+            <div className="border rounded-lg overflow-hidden">
+              <div className="flex items-center justify-between p-4">
+                <div className="flex items-center gap-3">
+                  <div className="h-10 w-10 rounded-lg bg-green-100 dark:bg-green-950 flex items-center justify-center">
+                    <Calendar className="h-5 w-5 text-green-600 dark:text-green-400" />
+                  </div>
+                  <div>
+                    <p className="font-medium">Google Calendar</p>
+                    {gcalIntegration ? (
+                      <div className="space-y-0.5">
+                        <p className="text-xs text-muted-foreground">
+                          {gcalIntegration.metadata?.email || 'Connected'}
+                        </p>
+                        {gcalIntegration.last_synced_at && (
+                          <p className="text-xs text-muted-foreground">
+                            Last synced: {formatRelativeTime(gcalIntegration.last_synced_at)}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Auto-sync tasks and meetings to your calendar
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {gcalIntegration ? (
+                    <>
+                      <Badge variant="default" className="bg-green-600">
+                        <CheckCircle2 className="h-3 w-3 mr-1" />
+                        Connected
+                      </Badge>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setShowGCalPrefs((v) => !v)}
+                        title="Calendar preferences"
+                        className="h-8 w-8 p-0"
+                      >
+                        {showGCalPrefs ? (
+                          <ChevronUp className="h-4 w-4" />
+                        ) : (
+                          <ChevronDown className="h-4 w-4" />
+                        )}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleDisconnect(gcalIntegration.id, 'Google Calendar')}
+                        disabled={disconnectMutation.isPending}
+                        className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                        title="Disconnect"
+                      >
+                        {disconnectMutation.isPending ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Link2Off className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      size="sm"
+                      onClick={() => startGCalOAuthMutation.mutate()}
+                      disabled={startGCalOAuthMutation.isPending}
+                    >
+                      {startGCalOAuthMutation.isPending ? (
+                        <><Loader2 className="h-4 w-4 animate-spin mr-1" /> Redirecting...</>
+                      ) : (
+                        <>
+                          <Link2 className="h-4 w-4 mr-1" />
+                          Connect
+                        </>
+                      )}
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+              {/* Calendar Preferences Panel */}
+              {gcalIntegration && showGCalPrefs && (
+                <div className="border-t bg-muted/30 px-4 py-4 space-y-4">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                    Sync Settings
+                  </p>
+
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium">Auto-sync tasks</p>
+                        <p className="text-xs text-muted-foreground">
+                          Automatically add tasks with due dates to your calendar
+                        </p>
+                      </div>
+                      <Switch
+                        checked={gcalPrefs?.auto_sync_tasks ?? true}
+                        onCheckedChange={(v) =>
+                          updateGCalPrefsMutation.mutate({ auto_sync_tasks: v })
+                        }
+                        disabled={updateGCalPrefsMutation.isPending}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium">Auto-sync meetings</p>
+                        <p className="text-xs text-muted-foreground">
+                          Create calendar events when meetings are processed
+                        </p>
+                      </div>
+                      <Switch
+                        checked={gcalPrefs?.auto_sync_meetings ?? true}
+                        onCheckedChange={(v) =>
+                          updateGCalPrefsMutation.mutate({ auto_sync_meetings: v })
+                        }
+                        disabled={updateGCalPrefsMutation.isPending}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium">Auto-sync action items</p>
+                        <p className="text-xs text-muted-foreground">
+                          Add action items with deadlines to your calendar
+                        </p>
+                      </div>
+                      <Switch
+                        checked={gcalPrefs?.auto_sync_actions ?? false}
+                        onCheckedChange={(v) =>
+                          updateGCalPrefsMutation.mutate({ auto_sync_actions: v })
+                        }
+                        disabled={updateGCalPrefsMutation.isPending}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium">Daily digest event</p>
+                        <p className="text-xs text-muted-foreground">
+                          Create a morning calendar event with today's tasks
+                        </p>
+                      </div>
+                      <Switch
+                        checked={gcalPrefs?.daily_digest_enabled ?? false}
+                        onCheckedChange={(v) =>
+                          updateGCalPrefsMutation.mutate({ daily_digest_enabled: v })
+                        }
+                        disabled={updateGCalPrefsMutation.isPending}
+                      />
+                    </div>
+
+                    {gcalPrefs?.daily_digest_enabled && (
+                      <div className="flex items-center gap-3 pl-0">
+                        <Label htmlFor="digest-time" className="text-sm text-muted-foreground w-24 shrink-0">
+                          Digest time
+                        </Label>
+                        <Input
+                          id="digest-time"
+                          type="time"
+                          value={gcalPrefs?.daily_digest_time ?? '08:00'}
+                          onChange={(e) =>
+                            updateGCalPrefsMutation.mutate({ daily_digest_time: e.target.value })
+                          }
+                          className="w-32"
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="pt-2 border-t">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => syncAllTasksMutation.mutate()}
+                      disabled={syncAllTasksMutation.isPending}
+                      className="gap-2"
+                    >
+                      {syncAllTasksMutation.isPending ? (
+                        <><Loader2 className="h-4 w-4 animate-spin" /> Syncing...</>
+                      ) : (
+                        <><RefreshCw className="h-4 w-4" /> Sync All Tasks Now</>
+                      )}
+                    </Button>
+                    <p className="mt-1.5 text-xs text-muted-foreground">
+                      Queues all your assigned tasks with due dates to be added to Google Calendar.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Google Meet */}
+            <div className="border rounded-lg overflow-hidden">
+              <div className="flex items-center justify-between p-4">
+                <div className="flex items-center gap-3">
+                  <div className="h-10 w-10 rounded-lg bg-blue-100 dark:bg-blue-950 flex items-center justify-center">
+                    <svg className="h-5 w-5 text-blue-500" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M21.5 7.5l-3 2.25v4.5l3 2.25A.5.5 0 0022 16V8a.5.5 0 00-.5-.5zM14 7H4a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2V9a2 2 0 00-2-2z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <p className="font-medium">Google Meet</p>
+                    {gcalIntegration ? (
+                      <p className="text-xs text-muted-foreground">
+                        Auto-generates Meet links for meetings via Google Calendar
+                      </p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Requires Google Calendar — auto-attaches Meet links to meetings
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {gcalIntegration ? (
+                    <Badge variant="default" className="bg-green-600">
+                      <CheckCircle2 className="h-3 w-3 mr-1" />
+                      Connected via Google Calendar
+                    </Badge>
+                  ) : (
+                    <Button
+                      size="sm"
+                      onClick={() => startGCalOAuthMutation.mutate()}
+                      disabled={startGCalOAuthMutation.isPending}
+                    >
+                      {startGCalOAuthMutation.isPending ? (
+                        <><Loader2 className="h-4 w-4 animate-spin mr-1" /> Redirecting...</>
+                      ) : (
+                        <>
+                          <Link2 className="h-4 w-4 mr-1" />
+                          Connect Google Calendar
+                        </>
+                      )}
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -1136,13 +1435,5 @@ function SettingsPageContent() {
         </CardContent>
       </Card>
     </div>
-  )
-}
-
-export default function SettingsPage() {
-  return (
-    <Suspense fallback={<div className="flex items-center justify-center py-12"><div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" /></div>}>
-      <SettingsPageContent />
-    </Suspense>
   )
 }

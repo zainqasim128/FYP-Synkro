@@ -40,6 +40,7 @@ from app.models.meeting import Meeting, MeetingStatus
 from app.services import jira_service as jira_module
 from app.services import slack_service as slack_module
 from app.services import zoom_service as zoom_module
+from app.services import google_calendar_service as gcal_module
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/integrations", tags=["Integrations"])
@@ -625,6 +626,9 @@ async def sync_integration(
 
     if integration.platform == IntegrationPlatform.SLACK:
         try:
+            from datetime import timezone
+            from datetime import datetime as dt
+
             token = decrypt_value(integration.access_token)
             svc = slack_module.SlackService(token)
 
@@ -636,9 +640,46 @@ async def sync_integration(
             })
             channels = resp.get("channels", [])
 
+            # Cache user ID → display name to avoid redundant API calls
+            user_name_cache: Dict[str, str] = {}
+
+            import re
+            _slack_uid_re = re.compile(r'^[UW][A-Z0-9]{6,}$')
+
+            async def resolve_name(uid: str) -> str:
+                if not uid:
+                    return "unknown"
+                if uid not in user_name_cache:
+                    try:
+                        user_info = await svc.get_user_info(uid)
+                        profile = user_info.get("profile", {})
+                        user_name_cache[uid] = (
+                            profile.get("display_name")
+                            or profile.get("real_name")
+                            or uid
+                        )
+                    except Exception:
+                        user_name_cache[uid] = uid
+                return user_name_cache[uid]
+
+            # Fix existing messages that have raw Slack user IDs as sender_name
+            from sqlalchemy import update as sa_update
+            stale_q = await db.execute(
+                select(Message).where(
+                    Message.platform == "slack",
+                    Message.user_id == current_user.id,
+                )
+            )
+            stale_msgs = stale_q.scalars().all()
+            for m in stale_msgs:
+                if m.sender_name and _slack_uid_re.match(m.sender_name):
+                    resolved = await resolve_name(m.sender_name)
+                    if resolved != m.sender_name:
+                        m.sender_name = resolved
+            await db.commit()
+
             for ch in channels:
                 ch_id = ch["id"]
-                ch_name = ch.get("name", ch_id)
                 try:
                     messages = await svc.get_channel_messages(ch_id, limit=50)
                     for msg in messages:
@@ -650,22 +691,20 @@ async def sync_integration(
                         )
                         if exists.scalar_one_or_none():
                             continue
-                        from datetime import timezone
+
+                        sender_name = await resolve_name(msg.get("user", ""))
+
                         ts = float(msg.get("ts", 0))
-                        from datetime import datetime as dt
-                        created = dt.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None) if ts else dt.utcnow()
+                        msg_time = dt.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None) if ts else dt.utcnow()
                         db.add(Message(
                             user_id=current_user.id,
                             platform="slack",
                             external_id=external_id,
-                            sender_id=msg.get("user", ""),
-                            sender_name=msg.get("user", "unknown"),
+                            sender_name=sender_name,
                             content=msg.get("text", ""),
                             channel_id=ch_id,
-                            channel_name=ch_name,
                             channel_type="channel",
-                            is_direct=False,
-                            created_at=created,
+                            timestamp=msg_time,
                         ))
                         synced_count += 1
                 except Exception:
@@ -1202,4 +1241,220 @@ async def _handle_recording_completed(obj: Dict[str, Any], db: AsyncSession) -> 
         logger.info("Enqueued process_meeting_background for meeting %s", meeting.id)
     except Exception as exc:
         logger.error("Failed to enqueue processing for meeting %s: %s", meeting.id, exc)
+
+# ── Google Calendar OAuth 2.0 ─────────────────────────────────────────────────
+
+
+class GCalConnectResponse(BaseModel):
+    authorization_url: str
+
+
+class GCalTestResponse(BaseModel):
+    ok: bool
+    calendar_id: Optional[str] = None
+    summary: Optional[str] = None
+
+
+@router.get(
+    "/google-calendar/start",
+    response_model=GCalConnectResponse,
+    summary="Start Google Calendar OAuth flow — returns authorization URL",
+)
+async def gcal_oauth_start(
+    current_user: User = Depends(get_current_user),
+) -> GCalConnectResponse:
+    """Return the Google OAuth consent URL. Frontend should redirect the user there."""
+    if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google Calendar is not configured. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to .env",
+        )
+    url = gcal_module.GoogleCalendarService.get_authorization_url(state=current_user.id)
+    return GCalConnectResponse(authorization_url=url)
+
+
+@router.get(
+    "/google-calendar/callback",
+    summary="Google Calendar OAuth callback — exchanges code for tokens",
+    include_in_schema=False,
+)
+async def gcal_oauth_callback(
+    code: str,
+    state: str,
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    """Handle the OAuth redirect from Google.
+
+    Exchanges the code for access + refresh tokens, encrypts them,
+    and upserts the Integration record. User is identified via the state param.
+    """
+    frontend_base = settings.FRONTEND_URL or "http://localhost:3000"
+    error_redirect = (
+        f"{frontend_base}/dashboard/settings?integration=google-calendar&status=error"
+    )
+    success_redirect = (
+        f"{frontend_base}/dashboard/settings?integration=google-calendar&status=success"
+    )
+
+    user_result = await db.execute(select(User).where(User.id == state))
+    current_user = user_result.scalar_one_or_none()
+    if not current_user:
+        logger.error("GCal OAuth callback: user not found for state=%s", state)
+        return RedirectResponse(
+            url=f"{error_redirect}&message=user_not_found", status_code=302
+        )
+
+    try:
+        data = await gcal_module.GoogleCalendarService.exchange_code(code)
+    except Exception as exc:
+        logger.error("GCal code exchange failed for user %s: %s", current_user.id, exc)
+        return RedirectResponse(
+            url=f"{error_redirect}&message={str(exc)[:200]}", status_code=302
+        )
+
+    access_token: str = data.get("access_token", "")
+    refresh_token: str = data.get("refresh_token", "")
+    expires_in: int = data.get("expires_in", 3600)
+    scope: str = data.get("scope", "")
+
+    if not access_token:
+        return RedirectResponse(
+            url=f"{error_redirect}&message=missing_access_token", status_code=302
+        )
+
+    from app.utils.security import encrypt_value
+
+    expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+    encrypted_token = encrypt_value(access_token)
+    encrypted_refresh = encrypt_value(refresh_token) if refresh_token else None
+
+    existing_q = await db.execute(
+        select(Integration).where(
+            and_(
+                Integration.user_id == current_user.id,
+                Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+            )
+        )
+    )
+    integration = existing_q.scalar_one_or_none()
+
+    if integration:
+        integration.access_token = encrypted_token
+        integration.refresh_token = encrypted_refresh
+        integration.expires_at = expires_at
+        integration.scope = scope
+        integration.is_active = True
+        integration.platform_metadata = {"email": current_user.email}
+    else:
+        integration = Integration(
+            user_id=current_user.id,
+            platform=IntegrationPlatform.GOOGLE_CALENDAR,
+            access_token=encrypted_token,
+            refresh_token=encrypted_refresh,
+            expires_at=expires_at,
+            scope=scope,
+            is_active=True,
+            platform_metadata={"email": current_user.email},
+        )
+        db.add(integration)
+
+    await db.commit()
+    logger.info("Google Calendar connected: user=%s", current_user.id)
+    return RedirectResponse(url=success_redirect, status_code=302)
+
+
+@router.get(
+    "/google-calendar/test",
+    response_model=GCalTestResponse,
+    summary="Verify stored Google Calendar token is still valid",
+)
+async def test_gcal_connection(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> GCalTestResponse:
+    """Call Google Calendar API to confirm stored token works."""
+    result = await db.execute(
+        select(Integration).where(
+            and_(
+                Integration.user_id == current_user.id,
+                Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+                Integration.is_active == True,
+            )
+        )
+    )
+    integration = result.scalar_one_or_none()
+    if not integration:
+        raise HTTPException(status_code=404, detail="Google Calendar integration not found")
+
+    svc = gcal_module.GoogleCalendarService.from_integration(integration)
+    try:
+        cal_info = await svc.verify_connection()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Google Calendar token invalid: {exc}",
+        )
+    finally:
+        await svc.aclose()
+
+    return GCalTestResponse(
+        ok=True,
+        calendar_id=cal_info.get("id"),
+        summary=cal_info.get("summary"),
+    )
+
+
+@router.get(
+    "/google-calendar/diagnose",
+    summary="Diagnose Google Calendar 403 / scope issues",
+)
+async def diagnose_gcal(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return raw Google API error details to diagnose 403/scope problems."""
+    import httpx as _httpx
+
+    result = await db.execute(
+        select(Integration).where(
+            and_(
+                Integration.user_id == current_user.id,
+                Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+                Integration.is_active == True,
+            )
+        )
+    )
+    integration = result.scalar_one_or_none()
+    if not integration:
+        return {"connected": False, "detail": "No active Google Calendar integration found."}
+
+    svc = gcal_module.GoogleCalendarService.from_integration(integration)
+    try:
+        info = await svc.verify_connection()
+        return {
+            "connected": True,
+            "calendar_id": info.get("id"),
+            "summary": info.get("summary"),
+            "stored_scope": integration.scope,
+        }
+    except _httpx.HTTPStatusError as exc:
+        try:
+            body = exc.response.json()
+        except Exception:
+            body = {"raw": exc.response.text[:500]}
+        return {
+            "connected": False,
+            "http_status": exc.response.status_code,
+            "google_error": body,
+            "stored_scope": integration.scope,
+            "hint": (
+                "accessNotConfigured → enable Google Calendar API at console.cloud.google.com"
+                if body.get("error", {}).get("errors", [{}])[0].get("reason") == "accessNotConfigured"
+                else "Add your Google account as a Test User in the OAuth consent screen, then reconnect."
+            ),
+        }
+    except Exception as exc:
+        return {"connected": False, "detail": str(exc)}
+    finally:
+        await svc.aclose()
 

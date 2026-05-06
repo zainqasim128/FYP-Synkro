@@ -58,6 +58,8 @@ export interface Task {
   source_type: 'manual' | 'meeting' | 'message' | 'ai';
   source_id?: string;
   external_id?: string;
+  calendar_event_id?: string;
+  calendar_synced_at?: string;
   created_at: string;
   updated_at?: string;
   assignee?: Partial<User>;
@@ -110,6 +112,8 @@ export interface Meeting {
   action_items: ActionItem[];
   zoom_meeting_id?: string;
   zoom_recording_id?: string;
+  calendar_event_id?: string;
+  google_meet_link?: string;
 }
 
 export interface ActionItem {

@@ -263,8 +263,25 @@ def summarize_meeting_task(self, meeting_id: str):
             db.commit()
             logger.info(f"Meeting {meeting_id}: Status updated to COMPLETED")
 
-            # TODO: Send notifications to mentioned assignees
-            # This would involve looking up users and sending emails/Slack messages
+            # Fire-and-forget: sync meeting + action items to Google Calendar
+            try:
+                from app.tasks.integration_tasks import (
+                    sync_meeting_to_calendar,
+                    sync_action_item_to_calendar,
+                )
+                sync_meeting_to_calendar.delay(meeting_id, meeting.created_by_id)
+
+                # Sync action items that have a deadline
+                ai_result = db.execute(
+                    select(ActionItem).where(ActionItem.meeting_id == meeting_id)
+                )
+                for ai in ai_result.scalars().all():
+                    if ai.deadline_mentioned and not ai.calendar_event_id:
+                        sync_action_item_to_calendar.delay(ai.id, meeting.created_by_id)
+            except Exception as cal_exc:
+                logger.warning(
+                    f"Meeting {meeting_id}: Calendar sync queue failed (non-fatal): {cal_exc}"
+                )
 
             return {
                 "status": "success",

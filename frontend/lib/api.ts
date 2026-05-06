@@ -141,7 +141,7 @@ export const taskApi = {
   createTask: (data: Record<string, any>) => api.post('/api/tasks', data),
   updateTask: (id: string, data: Record<string, any>) => api.patch(`/api/tasks/${id}`, data),
   deleteTask: (id: string) => api.delete(`/api/tasks/${id}`),
-  getStats: (params?: { assignee_id?: string }) => api.get('/api/tasks/stats', { params }),
+  getStats: () => api.get('/api/tasks/stats'),
 }
 
 // Meeting API
@@ -162,14 +162,11 @@ export const meetingApi = {
     api.post(`/api/meetings/${meetingId}/action-items/${actionItemId}/convert`),
   rejectActionItem: (meetingId: string, actionItemId: string) =>
     api.post(`/api/meetings/${meetingId}/action-items/${actionItemId}/reject`),
+  generateMeetLink: (id: string) => api.post(`/api/meetings/${id}/generate-meet-link`),
   updateSpeakerNames: (meetingId: string, speakerNames: Record<string, string>) =>
     api.patch(`/api/meetings/${meetingId}/speaker-names`, { speaker_names: speakerNames }),
   exportTranscript: (meetingId: string, format: 'txt' | 'summary' = 'txt') =>
     api.get(`/api/meetings/${meetingId}/export`, { params: { format }, responseType: 'blob' }),
-  getPendingAssignments: (meetingId: string) =>
-    api.get(`/api/meetings/${meetingId}/pending-assignments`),
-  bulkAssignActionItems: (meetingId: string, assignments: { action_item_id: string; assignee_id: string | null }[]) =>
-    api.post(`/api/meetings/${meetingId}/bulk-assign`, { assignments }),
 }
 
 // Chat API
@@ -186,7 +183,6 @@ export const emailApi = {
     api.post('/api/emails/sync', null, { params }),
   getStats: () => api.get('/api/emails/stats'),
   seedDemo: () => api.post('/api/emails/seed-demo'),
-  deleteEmail: (id: string) => api.delete(`/api/emails/${id}`),
 }
 
 // Messages (Slack) API
@@ -212,6 +208,8 @@ export const integrationsApi = {
   syncIntegration: (id: string) => api.post(`/api/integrations/${id}/sync`),
   startZoomOAuth: () => api.get('/api/integrations/zoom/start'),
   testZoomConnection: () => api.get('/api/integrations/zoom/test'),
+  startGCalOAuth: () => api.get('/api/integrations/google-calendar/start'),
+  testGCalConnection: () => api.get('/api/integrations/google-calendar/test'),
 }
 
 // Direct Messages API
@@ -224,6 +222,19 @@ export const dmApi = {
   getUnreadCount: () => api.get<{ unread: number }>('/api/dm/unread-count'),
   clearAllDms: () => api.delete('/api/dm/clear-all'),
   deleteMessage: (messageId: string) => api.delete(`/api/dm/message/${messageId}`),
+}
+
+// Calendar API
+export const calendarApi = {
+  getPreferences: () => api.get('/api/calendar/preferences'),
+  updatePreferences: (prefs: Record<string, any>) => api.put('/api/calendar/preferences', prefs),
+  syncAllTasks: () => api.post('/api/calendar/sync-all'),
+  syncTask: (taskId: string) => api.post(`/api/calendar/sync-task/${taskId}`),
+  getEvents: (start: string, end: string) =>
+    api.get('/api/calendar/events', { params: { start, end } }),
+  getAvailability: (date: string) => api.get('/api/calendar/availability', { params: { date } }),
+  suggestSlots: (durationHours = 1.0, daysAhead = 7) =>
+    api.get('/api/calendar/suggest-slots', { params: { duration_hours: durationHours, days_ahead: daysAhead } }),
 }
 
 // Analytics API

@@ -1,4 +1,6 @@
 """Task management endpoints - CRUD operations and statistics"""
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_
@@ -12,6 +14,7 @@ from app.models.user import UserRole
 from app.schemas.task import TaskCreate, TaskUpdate, TaskResponse, TaskStats
 from app.dependencies import get_current_user
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/tasks", tags=["Tasks"])
 
 MANAGEMENT_ROLES = {UserRole.ADMIN}
@@ -179,21 +182,76 @@ async def create_task(
     await db.commit()
     await db.refresh(new_task)
 
-    # Fire-and-forget: sync to Jira if the user has an active integration
+    # Sync to Jira directly (async-safe — avoids asyncio.run() nested loop issue)
     try:
-        from app.tasks.integration_tasks import sync_task_to_jira, notify_slack_task_created
-        jira_result = await db.execute(
+        from app.services.jira_service import JiraService
+        import logging as _logging
+        _jlog = _logging.getLogger(__name__)
+        # Find Jira integration for any team member (not just current user)
+        team_user_ids_result = await db.execute(
+            select(User.id).where(User.team_id == current_user.team_id)
+        )
+        team_user_ids = [row[0] for row in team_user_ids_result.all()]
+        jira_int_result = await db.execute(
             select(Integration).where(
-                Integration.user_id == current_user.id,
+                Integration.user_id.in_(team_user_ids),
                 Integration.platform == IntegrationPlatform.JIRA,
                 Integration.is_active == True,
-            )
+            ).limit(1)
         )
-        if jira_result.scalar_one_or_none():
-            sync_task_to_jira.delay(new_task.id, current_user.id)
-        notify_slack_task_created.delay(new_task.id, current_user.id)
-    except Exception:
-        pass  # Don't fail task creation if background tasks can't be queued
+        jira_int = jira_int_result.scalar_one_or_none()
+        if jira_int:
+            project_key = (jira_int.platform_metadata or {}).get("project_key", "PROJ")
+            due_str = new_task.due_date.strftime("%Y-%m-%d") if new_task.due_date else None
+            jira = JiraService.from_integration(jira_int)
+            try:
+                sprint_id = await jira.get_active_sprint_id(project_key)
+                jira_result = await jira.create_issue(
+                    project_key=project_key,
+                    summary=new_task.title,
+                    description=new_task.description,
+                    priority=new_task.priority.value if new_task.priority else "medium",
+                    duedate=due_str,
+                    sprint_id=sprint_id,
+                )
+                new_task.external_id = jira_result.get("id")
+                await db.commit()
+                _jlog.info("Jira issue created: %s for task %s (sprint=%s)", jira_result.get("key"), new_task.id, sprint_id)
+            finally:
+                await jira.aclose()
+    except Exception as _e:
+        logger.error("Jira sync failed for task %s: %s", new_task.id, _e)
+
+    # Sync to Google Calendar if user has GCal connected and task has a due date
+    if new_task.due_date:
+        try:
+            from app.config import settings as _s
+            gcal_result = await db.execute(
+                select(Integration).where(
+                    Integration.user_id == current_user.id,
+                    Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+                    Integration.is_active == True,
+                )
+            )
+            gcal_int = gcal_result.scalar_one_or_none()
+            if gcal_int:
+                from app.services.google_calendar_service import GoogleCalendarService
+                assignee_name = "Unassigned"
+                if new_task.assignee:
+                    assignee_name = new_task.assignee.full_name
+                user_tz = getattr(current_user, 'timezone', None) or "UTC"
+                event_body = GoogleCalendarService.task_to_event(new_task, assignee_name, _s.FRONTEND_URL, user_timezone=user_tz)
+                svc = GoogleCalendarService.from_integration(gcal_int)
+                try:
+                    event = await svc.create_event("primary", event_body)
+                    new_task.calendar_event_id = event.get("id")
+                    new_task.calendar_synced_at = datetime.utcnow()
+                    await db.commit()
+                    logger.info("create_task: synced task %s → GCal event %s", new_task.id, new_task.calendar_event_id)
+                finally:
+                    await svc.aclose()
+        except Exception as exc:
+            logger.error("create_task: GCal sync failed for task %s: %s", new_task.id, exc)
 
     # Load relationships
     result = await db.execute(
@@ -428,12 +486,84 @@ async def update_task(
             finally:
                 await jira.aclose()
     elif update_data:
-        # Task not yet in Jira — enqueue creation
+        # Task not yet in Jira — create issue now (async-safe)
         try:
-            from app.tasks.integration_tasks import sync_task_to_jira
-            sync_task_to_jira.delay(task.id, current_user.id)
+            from app.services.jira_service import JiraService
+            team_uids2 = await db.execute(select(User.id).where(User.team_id == current_user.team_id))
+            team_uid_list2 = [r[0] for r in team_uids2.all()]
+            jira_int2_result = await db.execute(
+                select(Integration).where(
+                    Integration.user_id.in_(team_uid_list2),
+                    Integration.platform == IntegrationPlatform.JIRA,
+                    Integration.is_active == True,
+                ).limit(1)
+            )
+            jira_int2 = jira_int2_result.scalar_one_or_none()
+            if jira_int2:
+                project_key2 = (jira_int2.platform_metadata or {}).get("project_key", "PROJ")
+                due_str2 = task.due_date.strftime("%Y-%m-%d") if task.due_date else None
+                jira2 = JiraService.from_integration(jira_int2)
+                try:
+                    sprint_id2 = await jira2.get_active_sprint_id(project_key2)
+                    r2 = await jira2.create_issue(
+                        project_key=project_key2,
+                        summary=task.title,
+                        description=task.description,
+                        priority=task.priority.value if task.priority else "medium",
+                        duedate=due_str2,
+                        sprint_id=sprint_id2,
+                    )
+                    task.external_id = r2.get("id")
+                    await db.commit()
+                finally:
+                    await jira2.aclose()
         except Exception:
             pass
+
+    # Sync to Google Calendar
+    try:
+        from app.config import settings as _s
+        gcal_q = await db.execute(
+            select(Integration).where(
+                Integration.user_id == current_user.id,
+                Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+                Integration.is_active == True,
+            )
+        )
+        gcal_int = gcal_q.scalar_one_or_none()
+        if gcal_int:
+            from app.services.google_calendar_service import GoogleCalendarService
+            assignee_name = "Unassigned"
+            if task.assignee:
+                assignee_name = task.assignee.full_name
+            user_tz = getattr(current_user, 'timezone', None) or "UTC"
+            if task.due_date:
+                event_body = GoogleCalendarService.task_to_event(task, assignee_name, _s.FRONTEND_URL, user_timezone=user_tz)
+                svc = GoogleCalendarService.from_integration(gcal_int)
+                try:
+                    if task.calendar_event_id:
+                        await svc.update_event("primary", task.calendar_event_id, event_body)
+                        logger.info("update_task: updated GCal event %s for task %s", task.calendar_event_id, task.id)
+                    else:
+                        event = await svc.create_event("primary", event_body)
+                        task.calendar_event_id = event.get("id")
+                        task.calendar_synced_at = datetime.utcnow()
+                        await db.commit()
+                        logger.info("update_task: created GCal event %s for task %s", task.calendar_event_id, task.id)
+                finally:
+                    await svc.aclose()
+            elif task.calendar_event_id:
+                # due_date was removed — delete the calendar event
+                svc = GoogleCalendarService.from_integration(gcal_int)
+                try:
+                    await svc.delete_event("primary", task.calendar_event_id)
+                    task.calendar_event_id = None
+                    await db.commit()
+                    logger.info("update_task: deleted GCal event for task %s (due_date removed)", task.id)
+                finally:
+                    await svc.aclose()
+    except Exception as exc:
+        logger.error("update_task: GCal sync failed for task %s: %s", task.id, exc)
 
     # Load relationships
     result = await db.execute(
@@ -477,6 +607,27 @@ async def delete_task(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Task not found"
         )
+
+    # Delete associated Google Calendar event if one exists
+    if task.calendar_event_id:
+        try:
+            gcal_q = await db.execute(
+                select(Integration).where(
+                    Integration.user_id == current_user.id,
+                    Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+                    Integration.is_active == True,
+                )
+            )
+            gcal_int = gcal_q.scalar_one_or_none()
+            if gcal_int:
+                from app.services.google_calendar_service import GoogleCalendarService
+                svc = GoogleCalendarService.from_integration(gcal_int)
+                try:
+                    await svc.delete_event("primary", task.calendar_event_id)
+                finally:
+                    await svc.aclose()
+        except Exception as exc:
+            logger.warning("delete_task: GCal event deletion failed: %s", exc)
 
     await db.delete(task)
     await db.commit()

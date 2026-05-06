@@ -39,6 +39,10 @@ class Meeting(Base):
     zoom_meeting_id = Column(String(100), nullable=True, index=True)
     zoom_recording_id = Column(String(100), nullable=True)  # dedup guard
 
+    # Google Calendar integration fields
+    calendar_event_id = Column(String(500), nullable=True)
+    google_meet_link = Column(String(500), nullable=True)
+
     # Foreign Keys
     team_id = Column(String(36), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
     created_by_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)

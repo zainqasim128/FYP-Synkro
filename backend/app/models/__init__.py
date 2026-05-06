@@ -11,6 +11,7 @@ from app.models.integration import Integration, IntegrationPlatform
 from app.models.message import Message, MessageIntent
 from app.models.email import Email
 from app.models.direct_message import DirectMessage
+from app.models.calendar_preference import CalendarPreferences
 
 __all__ = [
     "Team",
@@ -31,4 +32,5 @@ __all__ = [
     "MessageIntent",
     "Email",
     "DirectMessage",
+    "CalendarPreferences",
 ]

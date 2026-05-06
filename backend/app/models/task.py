@@ -59,6 +59,10 @@ class Task(Base):
     creator = relationship("User", foreign_keys=[created_by_id], back_populates="created_tasks")
     team = relationship("Team", back_populates="tasks")
 
+    # Google Calendar sync
+    calendar_event_id = Column(String(500), nullable=True)
+    calendar_synced_at = Column(DateTime, nullable=True)
+
     # Indexes for common queries
     __table_args__ = (
         Index('idx_task_status_assignee', 'status', 'assignee_id'),

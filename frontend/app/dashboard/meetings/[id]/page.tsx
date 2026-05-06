@@ -25,9 +25,8 @@ import {
   Pencil,
   Check,
   Download,
-  UserCheck,
+  Video,
 } from 'lucide-react'
-import { TaskAssignmentDialog } from '@/components/task-assignment-dialog'
 
 // ── Speaker color palette ─────────────────────────────────────
 const SPEAKER_COLORS: Record<string, { bg: string; text: string; border: string }> = {
@@ -97,9 +96,6 @@ export default function MeetingDetailPage() {
   const [activeSpeakerFilter, setActiveSpeakerFilter] = useState<string | null>(null)
   // Speaker name suggestions from team members
   const [nameSuggestions, setNameSuggestions] = useState<string[]>([])
-  // Task assignment dialog
-  const [showAssignDialog, setShowAssignDialog] = useState(false)
-  const prevStatusRef = useRef<string | null>(null)
 
   const { data: meeting, isLoading, error } = useQuery<Meeting>({
     queryKey: ['meeting', meetingId],
@@ -132,18 +128,6 @@ export default function MeetingDetailPage() {
     }
   }, [meeting?.speaker_names])
 
-  // Auto-show assignment dialog when meeting transitions to completed with pending items
-  useEffect(() => {
-    if (!meeting) return
-    const prev = prevStatusRef.current
-    prevStatusRef.current = meeting.status
-    const justCompleted = prev === 'processing' || prev === 'transcribed'
-    const hasPending = (meeting.action_items?.filter((a) => a.status === 'pending').length ?? 0) > 0
-    if (justCompleted && meeting.status === 'completed' && hasPending) {
-      setShowAssignDialog(true)
-    }
-  }, [meeting?.status])
-
   const convertMutation = useMutation({
     mutationFn: (actionItemId: string) =>
       meetingApi.convertActionItem(meetingId, actionItemId),
@@ -162,6 +146,13 @@ export default function MeetingDetailPage() {
 
   const retryMutation = useMutation({
     mutationFn: () => meetingApi.retryMeeting(meetingId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['meeting', meetingId] })
+    },
+  })
+
+  const generateMeetLinkMutation = useMutation({
+    mutationFn: () => meetingApi.generateMeetLink(meetingId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['meeting', meetingId] })
     },
@@ -269,33 +260,6 @@ export default function MeetingDetailPage() {
   const convertedItems = meeting.action_items?.filter((a) => a.status === 'converted') || []
   const rejectedItems = meeting.action_items?.filter((a) => a.status === 'rejected') || []
 
-  // Build enriched pending items for the assignment dialog (with suggested assignee IDs)
-  const pendingAssignments = pendingItems.map((item) => {
-    let candidate: string | null = null
-    if (item.assignee_mentioned) candidate = item.assignee_mentioned.trim().toLowerCase()
-    else if (item.speaker_label && speakerNames[item.speaker_label])
-      candidate = speakerNames[item.speaker_label].trim().toLowerCase()
-
-    const suggested = candidate
-      ? (teamMembers || []).find(
-          (m) =>
-            m.full_name.toLowerCase().includes(candidate!) ||
-            m.email.toLowerCase().includes(candidate!)
-        )
-      : undefined
-
-    return {
-      id: item.id,
-      description: item.description,
-      assignee_mentioned: item.assignee_mentioned,
-      speaker_label: item.speaker_label,
-      speaker_display_name: item.speaker_label ? speakerNames[item.speaker_label] || item.speaker_label : undefined,
-      deadline_mentioned: item.deadline_mentioned,
-      confidence_score: item.confidence_score,
-      suggested_assignee_id: suggested?.id,
-    }
-  })
-
   // Resolve display name: use custom name if set, else original label
   const getDisplayName = (speaker: string) => speakerNames[speaker] || speaker
 
@@ -351,6 +315,30 @@ export default function MeetingDetailPage() {
                 </svg>
                 Auto-imported from Zoom
               </Badge>
+            )}
+            {meeting.google_meet_link ? (
+              <a
+                href={meeting.google_meet_link}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-md border border-green-300 bg-green-50 px-2.5 py-1 text-xs font-medium text-green-800 hover:bg-green-100 transition-colors dark:border-green-700 dark:bg-green-950 dark:text-green-300 dark:hover:bg-green-900"
+              >
+                <Video className="h-3 w-3" />
+                Join with Google Meet
+              </a>
+            ) : (
+              <button
+                onClick={() => generateMeetLinkMutation.mutate()}
+                disabled={generateMeetLinkMutation.isPending}
+                className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-green-400 bg-transparent px-2.5 py-1 text-xs font-medium text-green-700 hover:bg-green-50 transition-colors disabled:opacity-50 dark:border-green-600 dark:text-green-400"
+              >
+                {generateMeetLinkMutation.isPending ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Video className="h-3 w-3" />
+                )}
+                {generateMeetLinkMutation.isPending ? 'Generating…' : 'Get Meet Link'}
+              </button>
             )}
           </div>
         </div>
@@ -834,22 +822,10 @@ export default function MeetingDetailPage() {
               {pendingItems.length > 0 && (
                 <Card>
                   <CardHeader>
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <CardTitle className="text-lg">Pending Action Items</CardTitle>
-                        <CardDescription>
-                          Review and convert these AI-extracted items to tasks
-                        </CardDescription>
-                      </div>
-                      <Button
-                        size="sm"
-                        className="shrink-0"
-                        onClick={() => setShowAssignDialog(true)}
-                      >
-                        <UserCheck className="h-4 w-4 mr-1" />
-                        Assign Tasks
-                      </Button>
-                    </div>
+                    <CardTitle className="text-lg">Pending Action Items</CardTitle>
+                    <CardDescription>
+                      Review and convert these AI-extracted items to tasks
+                    </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-3">
                     {pendingItems.map((item) => (
@@ -924,17 +900,6 @@ export default function MeetingDetailPage() {
             </div>
           )}
         </>
-      )}
-
-      {/* Task assignment dialog — shown on meeting completion or on demand */}
-      {showAssignDialog && (
-        <TaskAssignmentDialog
-          meetingId={meetingId}
-          meetingTitle={meeting.title}
-          pendingItems={pendingAssignments}
-          teamMembers={teamMembers || []}
-          onClose={() => setShowAssignDialog(false)}
-        />
       )}
     </div>
   )

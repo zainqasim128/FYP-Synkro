@@ -140,6 +140,32 @@ class JiraService:
 
     # ── Issues ───────────────────────────────────────────────────────────────
 
+    async def get_active_sprint_id(self, project_key: str) -> Optional[int]:
+        """Return the active sprint ID for the first board in a project, or None."""
+        try:
+            agile_base = f"https://{self._domain}/rest/agile/1.0"
+            resp = await self._client.get(
+                f"{agile_base}/board",
+                params={"projectKeyOrId": project_key, "maxResults": 1},
+            )
+            if resp.status_code != 200:
+                return None
+            boards = resp.json().get("values", [])
+            if not boards:
+                return None
+            board_id = boards[0]["id"]
+            resp2 = await self._client.get(
+                f"{agile_base}/board/{board_id}/sprint",
+                params={"state": "active", "maxResults": 1},
+            )
+            if resp2.status_code != 200:
+                return None
+            sprints = resp2.json().get("values", [])
+            return sprints[0]["id"] if sprints else None
+        except Exception as e:
+            logger.warning("Could not get active sprint for %s: %s", project_key, e)
+            return None
+
     async def create_issue(
         self,
         project_key: str,
@@ -148,6 +174,7 @@ class JiraService:
         priority: Optional[str] = None,
         duedate: Optional[str] = None,
         issue_type: str = "Task",
+        sprint_id: Optional[int] = None,
         extra_fields: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a Jira issue.
@@ -192,6 +219,10 @@ class JiraService:
 
         if duedate:
             fields["duedate"] = duedate
+
+        if sprint_id:
+            # customfield_10020 is the standard Jira Cloud sprint field
+            fields["customfield_10020"] = sprint_id
 
         if extra_fields:
             fields.update(extra_fields)
