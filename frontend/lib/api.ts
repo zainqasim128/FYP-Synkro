@@ -172,7 +172,8 @@ export const meetingApi = {
 
 // Chat API
 export const chatApi = {
-  query: (message: string) => api.post('/api/chat/query', { message }),
+  query: (message: string, history: Array<{ role: string; content: string }> = []) =>
+    api.post('/api/chat/query', { message, history }),
   getHistory: () => api.get('/api/chat/history'),
 }
 

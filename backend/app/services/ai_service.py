@@ -412,3 +412,84 @@ Provide a helpful, conversational response based on the data. If suggesting acti
 
     except Exception as e:
         return f"I apologize, but I encountered an error processing your query: {str(e)}"
+
+
+async def chat_query_enhanced(
+    query: str,
+    context: Dict[str, Any],
+    history: List[Any],
+    user: Any,
+) -> str:
+    """
+    Role-aware chat with conversation history.
+
+    - Admins see team-wide data; other roles see only their own tasks.
+    - history is a list of {role, content} dicts (or Pydantic ChatMessage objects).
+    - Answers are strictly grounded in the provided context.
+    """
+    try:
+        client, model = _get_chat_client()
+
+        is_admin = getattr(user.role, "value", str(user.role)) == "admin"
+        role_label = getattr(user.role, "value", str(user.role))
+
+        admin_rules = """ADMIN VISIBILITY:
+- You have FULL access to all team data.
+- When the context includes "specific_member_tasks", the user asked about that specific person — answer about THEIR tasks using that field.
+- When the context includes "all_team_tasks", answer about the whole team's tasks.
+- When the context includes "team_workload", use it for workload/distribution questions.
+- You can freely discuss any team member's tasks, counts, and status."""
+
+        member_rules = """RESTRICTED VISIBILITY:
+- This user is NOT an admin.
+- Answer ONLY using their own tasks from "my_tasks" and "my_task_snapshot".
+- If they ask about another team member's tasks or team workload, respond: "Only admins can view other team members' tasks. You can only see your own assigned work."
+- Never reveal another user's task details."""
+
+        system_prompt = f"""You are Synkro AI, a workspace assistant for a software development team.
+
+USER: {user.full_name} | Role: {role_label} | Admin: {"YES" if is_admin else "NO"}
+
+{admin_rules if is_admin else member_rules}
+
+ANSWER FORMAT RULES:
+1. Base every answer strictly on the workspace data provided below. Never invent tasks, names, dates, or meetings.
+2. Be specific and cite exact numbers (e.g. "Fizzah has 4 active tasks, 1 overdue").
+3. Format task lists as bullet points:
+   • [Title] — Status: IN_PROGRESS | Priority: HIGH | Due: 2025-06-01 ⚠ OVERDUE
+4. Mark overdue tasks with ⚠ OVERDUE.
+5. If data for the question is not present in the context, say clearly what's missing.
+6. Keep answers concise — no filler phrases like "Great question!" or "Certainly!".
+7. When listing tasks always include: title, status, priority, due date (if available).
+8. For stats/counts, use exact numbers from snapshot fields.
+
+WORKSPACE DATA:
+{json.dumps(context, indent=2, default=str)}"""
+
+        messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+
+        # Append last 6 turns of history for multi-turn support
+        for msg in history[-6:]:
+            if isinstance(msg, dict):
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+            else:
+                role = getattr(msg, "role", "user")
+                content = getattr(msg, "content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+
+        messages.append({"role": "user", "content": query})
+
+        response = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=700,
+        )
+
+        return response.choices[0].message.content
+
+    except Exception as e:
+        logger.error(f"chat_query_enhanced failed: {e}")
+        return f"I encountered an error processing your query: {str(e)}. Please try again."

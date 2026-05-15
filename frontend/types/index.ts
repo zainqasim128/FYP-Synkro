@@ -133,8 +133,14 @@ export interface ActionItem {
   context_type?: ContextType
 }
 
+export interface ChatHistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export interface ChatQuery {
   message: string;
+  history?: ChatHistoryMessage[];
 }
 
 export interface ChatResponse {
