@@ -65,6 +65,7 @@ interface WorkBalancePanelProps {
 
 function WorkBalancePanel({ tasks, members, onFilterByMember }: WorkBalancePanelProps) {
   const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
 
   // Build per-member stats from tasks that have an assignee
   const stats = useMemo(() => {
@@ -75,8 +76,12 @@ function WorkBalancePanel({ tasks, members, onFilterByMember }: WorkBalancePanel
       if (!map[t.assignee_id]) map[t.assignee_id] = { name, total: 0, done: 0, overdue: 0, upcoming: 0 }
       map[t.assignee_id].total++
       if (t.status === 'done') map[t.assignee_id].done++
-      if (t.due_date && new Date(t.due_date) < now && t.status !== 'done') map[t.assignee_id].overdue++
-      if (t.due_date && new Date(t.due_date) >= now && t.status !== 'done') map[t.assignee_id].upcoming++
+      if (t.due_date && t.status !== 'done') {
+        const d = new Date(t.due_date)
+        const startOfDue = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+        if (startOfDue < startOfToday) map[t.assignee_id].overdue++
+        else map[t.assignee_id].upcoming++
+      }
     }
     return Object.entries(map)
       .map(([id, s]) => ({ id, ...s, active: s.total - s.done }))
@@ -429,9 +434,13 @@ export default function TasksPage() {
   )
 
   const now = new Date()
-  const overdueTasks = filteredTasks.filter(
-    (t) => t.due_date && new Date(t.due_date) < now && t.status !== 'done'
-  )
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const overdueTasks = filteredTasks.filter((t) => {
+    if (!t.due_date || t.status === 'done') return false
+    const d = new Date(t.due_date)
+    const startOfDue = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+    return startOfDue < startOfToday
+  })
 
   // Cycle status: todo → in_progress → done → todo
   const cycleStatus = (task: Task) => {
@@ -580,7 +589,12 @@ export default function TasksPage() {
       ) : (
         <div className="overflow-y-auto max-h-[calc(100vh-380px)] pr-1 space-y-2 scrollbar-thin">
           {filteredTasks.map((task) => {
-            const isOverdue = task.due_date && new Date(task.due_date) < now && task.status !== 'done'
+            const isOverdue = (() => {
+              if (!task.due_date || task.status === 'done') return false
+              const d = new Date(task.due_date)
+              const startOfDue = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+              return startOfDue < startOfToday
+            })()
             return (
               <Card
                 key={task.id}
@@ -682,7 +696,6 @@ export default function TasksPage() {
                           ) : (
                             <Clock className="h-3 w-3" />
                           )}
-                          {isOverdue ? 'Overdue: ' : 'Due '}
                           {formatDueDate(task.due_date)}
                         </span>
                       )}

@@ -33,6 +33,8 @@ _SLACK_API_BASE = "https://slack.com/api/"
 # Required scopes — extend this list if you add Slack features later
 _BOT_SCOPES: List[str] = [
     "channels:history",
+    "channels:join",
+    "channels:read",
     "chat:write",
     "users:read",
     "users:read.email",
@@ -224,6 +226,25 @@ class SlackService:
         return data
 
     # ── Messaging ────────────────────────────────────────────────────────────
+
+    async def delete_message(self, channel: str, ts: str) -> bool:
+        """Delete a message from a Slack channel.
+
+        Args:
+            channel: Channel ID (e.g. ``C01234``).
+            ts     : Message timestamp (the Slack message ID, e.g. ``1234567890.123456``).
+
+        Returns:
+            ``True`` if deleted, ``False`` if Slack rejected the request
+            (e.g. bot can only delete its own messages).
+        """
+        try:
+            await self._request("chat.delete", json={"channel": channel, "ts": ts})
+            logger.info("Slack message deleted — channel=%s ts=%s", channel, ts)
+            return True
+        except ValueError as exc:
+            logger.warning("Slack chat.delete failed (channel=%s ts=%s): %s", channel, ts, exc)
+            return False
 
     async def post_message(
         self,

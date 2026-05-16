@@ -11,6 +11,7 @@ Get a free key at: https://console.groq.com/keys
 import os
 import json
 import logging
+from datetime import date
 from typing import Optional, Dict, Any, List
 from openai import AsyncOpenAI
 
@@ -286,17 +287,27 @@ async def extract_task_entities(message: str) -> Dict[str, Any]:
     try:
         client, model = _get_chat_client()
 
-        prompt = f"""Extract task details from this message and return a JSON object.
+        today = date.today().isoformat()
+        prompt = f"""Extract task details from this Slack message and return a JSON object.
+
+Today's date: {today}
 
 Message: "{message}"
 
-Return ONLY a JSON object with these fields:
-{{"description": "Clear task description", "assignee": "Person name or null", "deadline": "YYYY-MM-DD or null", "priority": "low|medium|high|urgent"}}"""
+Rules:
+- "title": short imperative task title (max 80 chars), e.g. "Complete Jira integration"
+- "description": fuller description of what needs to be done
+- "assignee": the person being asked to do the task — extract from @mentions or direct addressing (e.g. "@fizzah" → "fizzah", "fizzah do X" → "fizzah"). Return null if unclear.
+- "deadline": date in YYYY-MM-DD if mentioned, else null. Use today's year ({date.today().year}) when only a day/month is given.
+- "priority": "low" | "medium" | "high" | "urgent" based on urgency language
+
+Return ONLY valid JSON:
+{{"title": "...", "description": "...", "assignee": "name or null", "deadline": "YYYY-MM-DD or null", "priority": "medium"}}"""
 
         response = await client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "Extract task information from messages. Return only valid JSON."},
+                {"role": "system", "content": "Extract task information from Slack messages. Return only valid JSON."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.2,
@@ -304,9 +315,13 @@ Return ONLY a JSON object with these fields:
         )
 
         result_text = response.choices[0].message.content.strip()
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
 
         try:
-            entities = json.loads(result_text)
+            entities = json.loads(result_text.strip())
             entities["confidence"] = 0.8
             return entities
         except json.JSONDecodeError:
@@ -331,7 +346,10 @@ async def extract_task_from_email(subject: str, sender: str, body: str) -> Dict[
     try:
         client, model = _get_chat_client()
 
+        today = date.today().isoformat()
         prompt = f"""You are an AI assistant that reads emails and determines whether they contain an actionable task that should be added to a task management system.
+
+Today's date: {today}
 
 Analyze this email carefully:
 
@@ -350,7 +368,7 @@ Return ONLY a valid JSON object, no other text:
   "title": "Short task title (max 100 chars)",
   "description": "Full task description including context from the email",
   "priority": "low|medium|high|urgent",
-  "due_date": "YYYY-MM-DD or null"
+  "due_date": "YYYY-MM-DD or null (use today's year {date.today().year} when only a day/month is given)"
 }}
 
 Or if no task:

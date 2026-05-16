@@ -55,6 +55,7 @@ async def list_messages(
             "channel_type": m.channel_type,
             "intent": m.intent,
             "processed": m.processed,
+            "external_id": m.external_id,
         }
         for m in messages
     ]
@@ -238,6 +239,44 @@ async def send_dm(
     await db.commit()
 
     return {"ok": True, "channel_id": channel_id}
+
+
+@router.delete("/{message_id}")
+async def delete_message(
+    message_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a message from local DB and attempt to delete it from Slack."""
+    result = await db.execute(select(Message).where(Message.id == message_id))
+    message = result.scalars().first()
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    slack_deleted = False
+    if message.platform == "slack" and message.channel_id and message.external_id:
+        # Find any active Slack integration to make the API call
+        int_result = await db.execute(
+            select(Integration).where(
+                Integration.platform == IntegrationPlatform.SLACK,
+                Integration.is_active == True,
+            )
+        )
+        integration = int_result.scalars().first()
+        if integration:
+            from app.services.slack_service import SlackService
+            slack = SlackService.from_integration(integration)
+            try:
+                slack_deleted = await slack.delete_message(
+                    channel=message.channel_id,
+                    ts=message.external_id,
+                )
+            finally:
+                await slack.aclose()
+
+    await db.delete(message)
+    await db.commit()
+    return {"ok": True, "slack_deleted": slack_deleted}
 
 
 @router.get("/dms/users")

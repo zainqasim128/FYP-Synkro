@@ -20,8 +20,8 @@ router = APIRouter(prefix="/api/emails", tags=["Emails"])
 
 @router.post("/sync")
 async def sync_emails(
-    limit: int = Query(default=30, le=50),
-    days: int = Query(default=7, le=30),
+    limit: int = Query(default=50, le=50),
+    days: int = Query(default=15, le=30),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -319,6 +319,49 @@ async def seed_demo_emails(
 
     await db.commit()
     return {"message": f"Created {count} demo emails", "count": count}
+
+
+@router.patch("/{email_id}/mark-read")
+async def mark_email_read(
+    email_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark an email as read locally and in Gmail."""
+    result = await db.execute(
+        select(Email).where(and_(Email.id == email_id, Email.user_id == current_user.id))
+    )
+    email_record = result.scalar_one_or_none()
+    if not email_record:
+        raise HTTPException(status_code=404, detail="Email not found")
+
+    email_record.is_read = True
+    gmail_marked = False
+
+    if email_record.gmail_message_id and not email_record.gmail_message_id.startswith("demo-"):
+        integ_result = await db.execute(
+            select(Integration).where(
+                and_(
+                    Integration.user_id == current_user.id,
+                    Integration.platform == IntegrationPlatform.GMAIL,
+                    Integration.is_active == True,
+                )
+            )
+        )
+        integration = integ_result.scalar_one_or_none()
+        if integration:
+            from app.services.gmail_service import mark_email_as_read_in_gmail
+            try:
+                gmail_marked = mark_email_as_read_in_gmail(
+                    integration.platform_metadata.get("email", ""),
+                    integration.access_token,
+                    email_record.gmail_message_id,
+                )
+            except Exception as e:
+                logger.warning(f"Could not mark email as read in Gmail: {e}")
+
+    await db.commit()
+    return {"ok": True, "gmail_marked": gmail_marked}
 
 
 @router.delete("/{email_id}")

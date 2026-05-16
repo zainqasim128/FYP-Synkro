@@ -201,6 +201,49 @@ def fetch_emails(
     return emails
 
 
+def mark_email_as_read_in_gmail(email_addr: str, app_password: str, gmail_message_id: str) -> bool:
+    """
+    Mark an email as read in Gmail by adding the \\Seen flag via IMAP.
+    Returns True if successful, False otherwise.
+    """
+    app_password = app_password.replace(" ", "")
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(email_addr, app_password)
+
+        folders_to_try = ["INBOX", "[Gmail]/All Mail"]
+        marked = False
+
+        for folder in folders_to_try:
+            try:
+                status, _ = mail.select(folder)
+                if status != "OK":
+                    continue
+                safe_id = gmail_message_id.replace('"', '\\"')
+                status, data = mail.search(None, f'HEADER Message-ID "{safe_id}"')
+                if status != "OK" or not data[0]:
+                    continue
+                msg_ids = data[0].split()
+                if not msg_ids:
+                    continue
+                for msg_id in msg_ids:
+                    mail.store(msg_id, "+FLAGS", "\\Seen")
+                marked = True
+                break
+            except Exception:
+                continue
+
+        mail.logout()
+        return marked
+
+    except imaplib.IMAP4.error as e:
+        logger.error(f"IMAP error while marking email as read: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to mark email as read in Gmail: {e}")
+        return False
+
+
 def delete_email_from_gmail(email_addr: str, app_password: str, gmail_message_id: str) -> bool:
     """
     Delete an email from Gmail by its Message-ID header.

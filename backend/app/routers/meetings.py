@@ -442,7 +442,7 @@ async def upload_recording_to_meeting(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Upload a recording file to an existing AWAITING_UPLOAD meeting (Zoom Track B).
+    Upload a recording file to an existing AWAITING_UPLOAD meeting.
 
     Attaches the file, transitions the meeting to PROCESSING, and enqueues
     the transcription pipeline. The meeting must belong to the current user's

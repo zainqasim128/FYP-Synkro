@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input'
 import {
   Mail,
   MailOpen,
+  MailCheck,
   RefreshCw,
   Loader2,
   Star,
@@ -89,11 +90,20 @@ export default function EmailsPage() {
 
   // Sync mutation
   const syncMutation = useMutation({
-    mutationFn: () => emailApi.syncEmails({ limit: 30, days: 7 }),
+    mutationFn: () => emailApi.syncEmails({ limit: 50, days: 15 }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['emails'] })
       queryClient.invalidateQueries({ queryKey: ['email-stats'] })
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
+    },
+  })
+
+  // Mark as read mutation
+  const markReadMutation = useMutation({
+    mutationFn: (id: string) => emailApi.markAsRead(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['emails'] })
+      queryClient.invalidateQueries({ queryKey: ['email-stats'] })
     },
   })
 
@@ -253,6 +263,7 @@ export default function EmailsPage() {
               const { name: senderName, email: senderEmail } = parseSender(em.sender)
 
               const isDeleting = deleteMutation.isPending && (deleteMutation.variables === em.id)
+              const isMarkingRead = markReadMutation.isPending && (markReadMutation.variables === em.id)
 
               return (
                 <div key={em.id}>
@@ -298,9 +309,9 @@ export default function EmailsPage() {
                       </p>
                     </button>
 
-                    {/* Date + expand + delete */}
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button onClick={() => setExpandedId(isExpanded ? null : em.id)} className="flex items-center gap-1">
+                    {/* Date + expand + actions */}
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button onClick={() => setExpandedId(isExpanded ? null : em.id)} className="flex items-center gap-1 mr-1">
                         <span className="text-xs text-muted-foreground whitespace-nowrap">
                           {em.received_at ? formatRelativeTime(em.received_at) : ''}
                         </span>
@@ -310,6 +321,20 @@ export default function EmailsPage() {
                           <ChevronDown className="h-4 w-4 text-muted-foreground" />
                         )}
                       </button>
+                      {!em.is_read && (
+                        <button
+                          onClick={() => markReadMutation.mutate(em.id)}
+                          disabled={isMarkingRead}
+                          className="p-1 rounded hover:bg-green-100 dark:hover:bg-green-950 text-muted-foreground hover:text-green-600 transition-colors disabled:opacity-50"
+                          title="Mark as read"
+                        >
+                          {isMarkingRead ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <MailCheck className="h-4 w-4" />
+                          )}
+                        </button>
+                      )}
                       <button
                         onClick={() => {
                           if (confirm('Delete this email? It will also be removed from Gmail.')) {

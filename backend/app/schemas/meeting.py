@@ -72,8 +72,6 @@ class MeetingResponse(MeetingBase):
     created_at: datetime
     updated_at: Optional[datetime] = None
     action_items: List[ActionItemResponse] = []
-    zoom_meeting_id: Optional[str] = None
-    zoom_recording_id: Optional[str] = None
     calendar_event_id: Optional[str] = None
     google_meet_link: Optional[str] = None
 

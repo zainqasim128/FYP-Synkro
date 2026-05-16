@@ -1,6 +1,6 @@
 import { type ClassValue, clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
-import { formatDistanceToNow, format, isPast, isToday, isTomorrow } from 'date-fns'
+import { formatDistanceToNow, format, isToday, isTomorrow, startOfDay } from 'date-fns'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -78,7 +78,7 @@ export function formatDueDate(dateStr: string | undefined | null): string {
     const date = new Date(dateStr)
     if (isToday(date)) return 'Due today'
     if (isTomorrow(date)) return 'Due tomorrow'
-    if (isPast(date)) return `Overdue · ${format(date, 'MMM d')}`
+    if (startOfDay(date) < startOfDay(new Date())) return `Overdue · ${format(date, 'MMM d')}`
     return `Due ${format(date, 'MMM d')}`
   } catch {
     return '—'

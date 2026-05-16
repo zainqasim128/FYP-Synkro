@@ -185,6 +185,8 @@ export const emailApi = {
     api.post('/api/emails/sync', null, { params }),
   getStats: () => api.get('/api/emails/stats'),
   seedDemo: () => api.post('/api/emails/seed-demo'),
+  markAsRead: (id: string) => api.patch(`/api/emails/${id}/mark-read`),
+  deleteEmail: (id: string) => api.delete(`/api/emails/${id}`),
 }
 
 // Messages (Slack) API
@@ -195,6 +197,7 @@ export const messagesApi = {
   getSlackUsers: () => api.get('/api/messages/dms/users'),
   sendDm: (payload: { slack_user_id: string; message: string; channel_id?: string }) =>
     api.post('/api/messages/dms/send', payload),
+  deleteMessage: (id: string) => api.delete(`/api/messages/${id}`),
 }
 
 // Integrations API
@@ -208,8 +211,6 @@ export const integrationsApi = {
     api.post('/api/integrations/jira/connect', credentials),
   disconnectIntegration: (id: string) => api.delete(`/api/integrations/${id}`),
   syncIntegration: (id: string) => api.post(`/api/integrations/${id}/sync`),
-  startZoomOAuth: () => api.get('/api/integrations/zoom/start'),
-  testZoomConnection: () => api.get('/api/integrations/zoom/test'),
   checkGCalConfigured: () => api.get('/api/integrations/google-calendar/configured'),
   startGCalOAuth: () => api.get('/api/integrations/google-calendar/start'),
   testGCalConnection: () => api.get('/api/integrations/google-calendar/test'),

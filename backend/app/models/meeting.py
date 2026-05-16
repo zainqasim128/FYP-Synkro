@@ -10,7 +10,7 @@ from app.database import Base
 
 class MeetingStatus(str, enum.Enum):
     """Meeting processing status"""
-    AWAITING_UPLOAD = "awaiting_upload"  # Created from Zoom webhook, waiting for file
+    AWAITING_UPLOAD = "awaiting_upload"
     SCHEDULED = "scheduled"
     PROCESSING = "processing"
     TRANSCRIBED = "transcribed"
@@ -34,10 +34,6 @@ class Meeting(Base):
     status = Column(SQLEnum(MeetingStatus), default=MeetingStatus.SCHEDULED, nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    # Zoom integration fields
-    zoom_meeting_id = Column(String(100), nullable=True, index=True)
-    zoom_recording_id = Column(String(100), nullable=True)  # dedup guard
 
     # Google Calendar integration fields
     calendar_event_id = Column(String(500), nullable=True)

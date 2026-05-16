@@ -110,8 +110,6 @@ export interface Meeting {
   created_at: string;
   updated_at?: string;
   action_items: ActionItem[];
-  zoom_meeting_id?: string;
-  zoom_recording_id?: string;
   calendar_event_id?: string;
   google_meet_link?: string;
 }
@@ -179,7 +177,7 @@ export interface TokenResponse {
 // Integration types
 export interface Integration {
   id: string;
-  platform: 'gmail' | 'slack' | 'google_calendar' | 'jira' | 'microsoft_teams' | 'zoom';
+  platform: 'gmail' | 'slack' | 'google_calendar' | 'jira' | 'microsoft_teams';
   is_active: boolean;
   last_synced_at?: string;
   created_at: string;

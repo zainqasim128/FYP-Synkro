@@ -18,28 +18,22 @@ Security notes
 - OAuth state param (Slack) should be a signed, time-limited CSRF token in prod.
 """
 
-import io
 import logging
-import secrets
-import tempfile
-import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, select
+from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import Integration, IntegrationPlatform, User
-from app.models.meeting import Meeting, MeetingStatus
 from app.services import jira_service as jira_module
 from app.services import slack_service as slack_module
-from app.services import zoom_service as zoom_module
 from app.services import google_calendar_service as gcal_module
 
 logger = logging.getLogger(__name__)
@@ -143,6 +137,8 @@ async def connect_gmail(
             detail=result["error"],
         )
 
+    from app.utils.security import encrypt_value
+
     existing_q = await db.execute(
         select(Integration).where(
             and_(
@@ -153,15 +149,17 @@ async def connect_gmail(
     )
     integration = existing_q.scalar_one_or_none()
 
+    encrypted_password = encrypt_value(app_password)
+
     if integration:
-        integration.access_token = app_password
+        integration.access_token = encrypted_password
         integration.is_active = True
         integration.platform_metadata = {"email": email_addr}
     else:
         integration = Integration(
             user_id=current_user.id,
             platform=IntegrationPlatform.GMAIL,
-            access_token=app_password,
+            access_token=encrypted_password,
             is_active=True,
             platform_metadata={"email": email_addr},
         )
@@ -198,8 +196,10 @@ async def get_gmail_emails(
             detail="Gmail not connected. Go to Settings to connect.",
         )
 
+    from app.utils.security import decrypt_value
+
     email_addr = integration.platform_metadata.get("email") or settings.GMAIL_EMAIL
-    app_password = integration.access_token
+    app_password = decrypt_value(integration.access_token)
 
     try:
         emails = fetch_emails(
@@ -392,6 +392,28 @@ async def slack_oauth_callback(
         None,
     )
     encrypted_token = encrypt_value(access_token)
+
+    # If connecting a different workspace, wipe old messages and stale integrations
+    from app.models import Message
+    old_team_ids = {
+        (i.platform_metadata or {}).get("team_id")
+        for i in all_user_slack
+        if (i.platform_metadata or {}).get("team_id") != team_id
+    }
+    if old_team_ids:
+        logger.info(
+            "New Slack workspace %s for user %s — clearing messages from old workspace(s) %s",
+            team_id, current_user.id, old_team_ids,
+        )
+        await db.execute(
+            delete(Message).where(
+                Message.user_id == current_user.id,
+                Message.platform == "slack",
+            )
+        )
+        for old_int in all_user_slack:
+            if (old_int.platform_metadata or {}).get("team_id") != team_id:
+                await db.delete(old_int)
 
     if integration:
         integration.access_token = encrypted_token
@@ -592,6 +614,103 @@ async def list_jira_projects(
     ]
 
 
+# ── Slack message → task background processor ─────────────────────────────────
+
+
+async def _process_slack_message_for_task(message_id: str) -> None:
+    """Classify a Slack message and auto-create a task if it is a task request."""
+    from app.database import AsyncSessionLocal
+    from app.models import Message
+    from app.models.task import Task, TaskStatus, TaskPriority, TaskSourceType
+    from app.models.user import User as UserModel
+    from app.services.ai_service import classify_intent, extract_task_entities
+
+    async with AsyncSessionLocal() as db:
+        try:
+            msg_result = await db.execute(select(Message).where(Message.id == message_id))
+            message = msg_result.scalar_one_or_none()
+            if not message or message.processed:
+                return
+
+            intent_data = await classify_intent(message.content)
+            message.intent = intent_data.get("intent", "information")
+
+            if intent_data.get("intent") != "task_request":
+                message.processed = True
+                await db.commit()
+                return
+
+            entities = await extract_task_entities(message.content)
+            message.entities = entities
+
+            # Resolve owning user → team
+            user_result = await db.execute(select(UserModel).where(UserModel.id == message.user_id))
+            msg_user = user_result.scalar_one_or_none()
+            if not msg_user or not msg_user.team_id:
+                message.processed = True
+                await db.commit()
+                return
+
+            # Resolve assignee name/@mention → team member
+            assignee_id = None
+            raw_assignee = (entities.get("assignee") or "").lstrip("@").lower().strip()
+            if raw_assignee:
+                members_result = await db.execute(
+                    select(UserModel).where(UserModel.team_id == msg_user.team_id)
+                )
+                for member in members_result.scalars().all():
+                    name_lower = (member.full_name or "").lower()
+                    email_lower = (member.email or "").lower()
+                    if (
+                        raw_assignee == name_lower
+                        or name_lower.startswith(raw_assignee)
+                        or email_lower.startswith(raw_assignee)
+                    ):
+                        assignee_id = member.id
+                        break
+
+            # Parse priority safely
+            priority_map = {p.value: p for p in TaskPriority}
+            priority = priority_map.get(
+                (entities.get("priority") or "medium").lower(), TaskPriority.MEDIUM
+            )
+
+            # Parse deadline
+            due_date = None
+            if entities.get("deadline"):
+                try:
+                    from dateutil import parser as date_parser
+                    due_date = date_parser.parse(entities["deadline"])
+                except Exception:
+                    pass
+
+            title = entities.get("title") or message.content[:100]
+            description = entities.get("description") or message.content
+
+            task = Task(
+                title=title,
+                description=description,
+                status=TaskStatus.TODO,
+                priority=priority,
+                due_date=due_date,
+                source_type=TaskSourceType.MESSAGE,
+                source_id=message.id,
+                team_id=msg_user.team_id,
+                created_by_id=message.user_id,
+                assignee_id=assignee_id,
+            )
+            db.add(task)
+            message.processed = True
+            await db.commit()
+            logger.info(
+                "Auto-created task '%s' from Slack message %s (assignee_id=%s)",
+                title, message_id, assignee_id,
+            )
+        except Exception as exc:
+            logger.error("Failed to process Slack message %s for task: %s", message_id, exc)
+            await db.rollback()
+
+
 # ── Generic sync / disconnect ──────────────────────────────────────────────────
 
 
@@ -601,6 +720,7 @@ async def list_jira_projects(
 )
 async def sync_integration(
     integration_id: str,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
@@ -632,9 +752,9 @@ async def sync_integration(
             token = decrypt_value(integration.access_token)
             svc = slack_module.SlackService(token)
 
-            # Fetch all public channels
+            # Fetch public channels (groups:read scope required for private — skip if not granted)
             resp = await svc._request("conversations.list", method="GET", params={
-                "types": "public_channel,private_channel",
+                "types": "public_channel",
                 "limit": 200,
                 "exclude_archived": "true",
             })
@@ -680,7 +800,15 @@ async def sync_integration(
 
             for ch in channels:
                 ch_id = ch["id"]
+                is_private = ch.get("is_private", False)
                 try:
+                    # Auto-join public channels so the bot can read history
+                    if not ch.get("is_member") and not is_private:
+                        try:
+                            await svc._request("conversations.join", method="POST", data={"channel": ch_id})
+                        except Exception:
+                            pass
+
                     messages = await svc.get_channel_messages(ch_id, limit=50)
                     for msg in messages:
                         if not msg.get("text") or msg.get("subtype"):
@@ -696,7 +824,7 @@ async def sync_integration(
 
                         ts = float(msg.get("ts", 0))
                         msg_time = dt.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None) if ts else dt.utcnow()
-                        db.add(Message(
+                        new_msg = Message(
                             user_id=current_user.id,
                             platform="slack",
                             external_id=external_id,
@@ -705,7 +833,10 @@ async def sync_integration(
                             channel_id=ch_id,
                             channel_type="channel",
                             timestamp=msg_time,
-                        ))
+                        )
+                        db.add(new_msg)
+                        await db.flush()  # get new_msg.id before background task
+                        background_tasks.add_task(_process_slack_message_for_task, new_msg.id)
                         synced_count += 1
                 except Exception:
                     continue
@@ -750,497 +881,7 @@ async def disconnect_integration(
         integration.platform.value,
         current_user.id,
     )
-# ── Zoom OAuth 2.0 ────────────────────────────────────────────────────────────
 
-
-class ZoomConnectResponse(BaseModel):
-    authorization_url: str
-
-
-class ZoomTestResponse(BaseModel):
-    ok: bool
-    zoom_user_id: Optional[str] = None
-    display_name: Optional[str] = None
-    email: Optional[str] = None
-
-
-@router.get(
-    "/zoom/start",
-    response_model=ZoomConnectResponse,
-    summary="Start Zoom OAuth flow — returns authorization URL",
-)
-async def zoom_oauth_start(
-    current_user: User = Depends(get_current_user),
-) -> ZoomConnectResponse:
-    """Return the Zoom authorization URL. The frontend should redirect the user there."""
-    state = secrets.token_urlsafe(16)
-    url = zoom_module.ZoomService.get_auth_url(state=state)
-    return ZoomConnectResponse(authorization_url=url)
-
-
-@router.get(
-    "/zoom/callback",
-    summary="Zoom OAuth callback — exchanges code for access token",
-    include_in_schema=False,
-)
-async def zoom_oauth_callback(
-    code: str,
-    state: Optional[str] = None,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-) -> RedirectResponse:
-    """Handle the OAuth redirect from Zoom.
-
-    Exchanges the code for tokens, encrypts them, and upserts the Integration row.
-    """
-    frontend_base = settings.FRONTEND_URL or "http://localhost:3000"
-    error_redirect = f"{frontend_base}/dashboard/settings?integration=zoom&status=error"
-    success_redirect = f"{frontend_base}/dashboard/settings?integration=zoom&status=success"
-
-    try:
-        data = await zoom_module.ZoomService.exchange_code(code)
-    except Exception as exc:
-        logger.error("Zoom OAuth code exchange failed for user %s: %s", current_user.id, exc)
-        return RedirectResponse(
-            url=f"{error_redirect}&message={str(exc)[:200]}", status_code=302
-        )
-
-    access_token: str = data.get("access_token", "")
-    refresh_token: str = data.get("refresh_token", "")
-    expires_in: int = data.get("expires_in", 3600)
-    scope: str = data.get("scope", "")
-
-    if not access_token:
-        return RedirectResponse(url=f"{error_redirect}&message=missing_access_token", status_code=302)
-
-    # Fetch Zoom user info to store in metadata
-    svc = zoom_module.ZoomService(access_token=access_token)
-    try:
-        zoom_user = await svc.get_user()
-    except Exception as exc:
-        logger.warning("Could not fetch Zoom user info for user %s: %s", current_user.id, exc)
-        zoom_user = {}
-    finally:
-        await svc.aclose()
-
-    from app.utils.security import encrypt_value
-
-    zoom_user_id: str = zoom_user.get("id", "")
-    metadata: Dict[str, Any] = {
-        "zoom_user_id": zoom_user_id,
-        "account_id": zoom_user.get("account_id", ""),
-        "display_name": zoom_user.get("display_name", ""),
-        "email": zoom_user.get("email", ""),
-    }
-
-    expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
-    encrypted_token = encrypt_value(access_token)
-    encrypted_refresh = encrypt_value(refresh_token) if refresh_token else None
-
-    existing_q = await db.execute(
-        select(Integration).where(
-            and_(
-                Integration.user_id == current_user.id,
-                Integration.platform == IntegrationPlatform.ZOOM,
-            )
-        )
-    )
-    integration = existing_q.scalar_one_or_none()
-
-    if integration:
-        integration.access_token = encrypted_token
-        integration.refresh_token = encrypted_refresh
-        integration.expires_at = expires_at
-        integration.scope = scope
-        integration.is_active = True
-        integration.platform_metadata = metadata
-    else:
-        integration = Integration(
-            user_id=current_user.id,
-            platform=IntegrationPlatform.ZOOM,
-            access_token=encrypted_token,
-            refresh_token=encrypted_refresh,
-            expires_at=expires_at,
-            scope=scope,
-            is_active=True,
-            platform_metadata=metadata,
-        )
-        db.add(integration)
-
-    await db.commit()
-    logger.info("Zoom connected: user=%s zoom_user=%s", current_user.id, zoom_user_id)
-    return RedirectResponse(url=success_redirect, status_code=302)
-
-
-@router.get(
-    "/zoom/test",
-    response_model=ZoomTestResponse,
-    summary="Verify stored Zoom credentials are still valid",
-)
-async def test_zoom_connection(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> ZoomTestResponse:
-    """Call Zoom GET /users/me to confirm stored token works."""
-    result = await db.execute(
-        select(Integration).where(
-            and_(
-                Integration.user_id == current_user.id,
-                Integration.platform == IntegrationPlatform.ZOOM,
-                Integration.is_active == True,
-            )
-        )
-    )
-    integration = result.scalar_one_or_none()
-    if not integration:
-        raise HTTPException(status_code=404, detail="Zoom integration not found")
-
-    # Refresh token if needed
-    if zoom_module.token_needs_refresh(integration.expires_at):
-        await _refresh_zoom_token(integration, db)
-
-    svc = zoom_module.ZoomService.from_integration(integration)
-    try:
-        user_info = await svc.get_user()
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Zoom token invalid: {exc}")
-    finally:
-        await svc.aclose()
-
-    return ZoomTestResponse(
-        ok=True,
-        zoom_user_id=user_info.get("id"),
-        display_name=user_info.get("display_name"),
-        email=user_info.get("email"),
-    )
-
-
-@router.post(
-    "/zoom/webhook",
-    summary="Receive Zoom webhook events",
-    include_in_schema=False,
-)
-async def zoom_webhook(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-) -> Dict[str, Any]:
-    """Handle Zoom webhook events.
-
-    Events handled:
-    - endpoint.url_validation  : Zoom URL validation challenge (must respond within 3s)
-    - meeting.ended            : Create Meeting(AWAITING_UPLOAD) + Slack DM notification
-    - recording.completed      : Download cloud recording → process pipeline (Track A)
-
-    Verified via HMAC-SHA256 using ZOOM_WEBHOOK_SECRET_TOKEN.
-    """
-    body = await request.body()
-
-    # Verify signature
-    signature = request.headers.get("x-zm-signature", "")
-    timestamp = request.headers.get("x-zm-request-timestamp", "")
-
-    # Allow endpoint validation challenge without full secret check
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON payload")
-
-    # Zoom URL validation challenge (no signature on first validation call)
-    if payload.get("event") == "endpoint.url_validation":
-        plain_token = payload.get("payload", {}).get("plainToken", "")
-        import hashlib as _hl
-        enc_token = _hl.sha256(
-            (settings.ZOOM_WEBHOOK_SECRET_TOKEN + plain_token).encode()
-        ).hexdigest()
-        return {"plainToken": plain_token, "encryptedToken": enc_token}
-
-    # Verify signature for all other events
-    if settings.ZOOM_WEBHOOK_SECRET_TOKEN:
-        if not zoom_module.ZoomService.verify_webhook_signature(body, signature, timestamp):
-            raise HTTPException(status_code=403, detail="Invalid webhook signature")
-
-    event = payload.get("event", "")
-    obj = payload.get("payload", {}).get("object", {})
-
-    logger.info("Zoom webhook event received: %s", event)
-
-    if event == "meeting.ended":
-        await _handle_meeting_ended(obj, db)
-    elif event == "recording.completed":
-        await _handle_recording_completed(obj, db)
-
-    return {"status": "ok"}
-
-
-# ── Zoom webhook sub-handlers ─────────────────────────────────────────────────
-
-
-async def _refresh_zoom_token(integration: Integration, db: AsyncSession) -> None:
-    """Refresh the Zoom access token and persist the updated values."""
-    from app.utils.security import decrypt_value, encrypt_value
-
-    if not integration.refresh_token:
-        logger.warning("Zoom integration %s has no refresh token", integration.id)
-        return
-
-    try:
-        raw_refresh = decrypt_value(integration.refresh_token)
-    except Exception:
-        raw_refresh = integration.refresh_token
-
-    try:
-        data = await zoom_module.ZoomService.refresh_access_token(raw_refresh)
-    except Exception as exc:
-        logger.error("Zoom token refresh failed for integration %s: %s", integration.id, exc)
-        return
-
-    integration.access_token = encrypt_value(data.get("access_token", ""))
-    if data.get("refresh_token"):
-        integration.refresh_token = encrypt_value(data["refresh_token"])
-    expires_in = data.get("expires_in", 3600)
-    integration.expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
-    await db.commit()
-
-
-async def _handle_meeting_ended(obj: Dict[str, Any], db: AsyncSession) -> None:
-    """Create an AWAITING_UPLOAD meeting row and send a Slack DM notification."""
-    import uuid
-
-    zoom_meeting_id = str(obj.get("id", ""))
-    topic = obj.get("topic", "Zoom Meeting")
-    start_time_str = obj.get("start_time")
-    duration_minutes = obj.get("duration")
-    host_id = obj.get("host_id", "")
-
-    if not zoom_meeting_id:
-        logger.warning("meeting.ended event missing meeting id")
-        return
-
-    # Resolve team via the Zoom integration whose zoom_user_id matches the host
-    result = await db.execute(
-        select(Integration).where(
-            and_(
-                Integration.platform == IntegrationPlatform.ZOOM,
-                Integration.is_active == True,
-            )
-        )
-    )
-    integrations = result.scalars().all()
-    zoom_integration = next(
-        (i for i in integrations if i.platform_metadata.get("zoom_user_id") == host_id),
-        integrations[0] if integrations else None,
-    )
-
-    if not zoom_integration:
-        logger.warning("No Zoom integration found for host_id=%s — skipping meeting.ended", host_id)
-        return
-
-    # Fetch the user to get their team_id
-    user_result = await db.execute(
-        select(User).where(User.id == zoom_integration.user_id)
-    )
-    host_user = user_result.scalar_one_or_none()
-    if not host_user or not host_user.team_id:
-        logger.warning("Host user or team not found for Zoom integration %s", zoom_integration.id)
-        return
-
-    # Parse scheduled_at
-    scheduled_at = None
-    if start_time_str:
-        try:
-            scheduled_at = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
-        except ValueError:
-            pass
-
-    meeting = Meeting(
-        id=str(uuid.uuid4()),
-        title=topic,
-        scheduled_at=scheduled_at,
-        duration_minutes=duration_minutes,
-        status=MeetingStatus.AWAITING_UPLOAD,
-        team_id=host_user.team_id,
-        created_by_id=host_user.id,
-        zoom_meeting_id=zoom_meeting_id,
-    )
-    db.add(meeting)
-    await db.commit()
-    await db.refresh(meeting)
-    logger.info("Created AWAITING_UPLOAD meeting %s for Zoom meeting %s", meeting.id, zoom_meeting_id)
-
-    # Send Slack DM notification if Slack is connected
-    slack_result = await db.execute(
-        select(Integration).where(
-            and_(
-                Integration.user_id == host_user.id,
-                Integration.platform == IntegrationPlatform.SLACK,
-                Integration.is_active == True,
-            )
-        )
-    )
-    slack_integration = slack_result.scalar_one_or_none()
-    if slack_integration:
-        slack_svc = slack_module.SlackService.from_integration(slack_integration)
-        try:
-            authed_user_id = slack_integration.platform_metadata.get("authed_user_id")
-            if authed_user_id:
-                frontend_url = settings.FRONTEND_URL or "http://localhost:3000"
-                upload_url = f"{frontend_url}/dashboard/meetings/{meeting.id}"
-                dm_channel = await slack_svc.open_dm_channel(authed_user_id)
-                await slack_svc.post_message(
-                    channel=dm_channel,
-                    text=(
-                        f"Your Zoom meeting *{topic}* just ended. "
-                        f"Upload the recording to get your transcript and action items: {upload_url}"
-                    ),
-                )
-                logger.info("Sent Slack DM to user %s for meeting %s", authed_user_id, meeting.id)
-        except Exception as exc:
-            logger.warning("Could not send Slack DM for meeting %s: %s", meeting.id, exc)
-        finally:
-            await slack_svc.aclose()
-
-
-async def _handle_recording_completed(obj: Dict[str, Any], db: AsyncSession) -> None:
-    """Download the cloud recording and enqueue the processing pipeline (Track A)."""
-    import uuid
-
-    zoom_meeting_id = str(obj.get("id", ""))
-    topic = obj.get("topic", "Zoom Meeting")
-    start_time_str = obj.get("start_time")
-    duration_minutes = obj.get("duration")
-    host_id = obj.get("host_id", "")
-    recording_files = obj.get("recording_files", [])
-
-    if not zoom_meeting_id:
-        logger.warning("recording.completed event missing meeting id")
-        return
-
-    # Find the best recording file (prefer audio-only M4A, fall back to MP4)
-    best_file = None
-    for rf in recording_files:
-        if rf.get("file_type") in ("M4A", "MP4") and rf.get("status") == "completed":
-            if best_file is None or rf.get("file_type") == "M4A":
-                best_file = rf
-
-    if not best_file:
-        logger.warning("No usable recording file for meeting %s", zoom_meeting_id)
-        return
-
-    recording_id = best_file.get("id", "")
-    download_url = best_file.get("download_url", "")
-
-    if not download_url:
-        logger.warning("Recording file has no download_url for meeting %s", zoom_meeting_id)
-        return
-
-    # Dedup guard — check if already processed
-    existing_q = await db.execute(
-        select(Meeting).where(Meeting.zoom_recording_id == recording_id)
-    )
-    if existing_q.scalar_one_or_none():
-        logger.info("Recording %s already processed — skipping", recording_id)
-        return
-
-    # Resolve Zoom integration for this host
-    result = await db.execute(
-        select(Integration).where(
-            and_(
-                Integration.platform == IntegrationPlatform.ZOOM,
-                Integration.is_active == True,
-            )
-        )
-    )
-    integrations = result.scalars().all()
-    zoom_integration = next(
-        (i for i in integrations if i.platform_metadata.get("zoom_user_id") == host_id),
-        integrations[0] if integrations else None,
-    )
-
-    if not zoom_integration:
-        logger.warning("No Zoom integration for host_id=%s — skipping recording.completed", host_id)
-        return
-
-    user_result = await db.execute(
-        select(User).where(User.id == zoom_integration.user_id)
-    )
-    host_user = user_result.scalar_one_or_none()
-    if not host_user or not host_user.team_id:
-        logger.warning("Host user or team not found for recording %s", recording_id)
-        return
-
-    # Refresh token if needed
-    if zoom_module.token_needs_refresh(zoom_integration.expires_at):
-        await _refresh_zoom_token(zoom_integration, db)
-
-    svc = zoom_module.ZoomService.from_integration(zoom_integration)
-    try:
-        file_bytes = await svc.download_recording_file(download_url)
-    except Exception as exc:
-        logger.error("Failed to download recording for meeting %s: %s", zoom_meeting_id, exc)
-        return
-    finally:
-        await svc.aclose()
-
-    # Upload to storage
-    from app.utils.storage import get_storage
-    storage = get_storage()
-    file_ext = "m4a" if best_file.get("file_type") == "M4A" else "mp4"
-    filename = f"zoom_{zoom_meeting_id}.{file_ext}"
-    content_type = "audio/mp4" if file_ext == "m4a" else "video/mp4"
-    recording_url = await storage.upload_file(
-        file_obj=io.BytesIO(file_bytes),
-        filename=filename,
-        folder="meetings",
-        content_type=content_type,
-    )
-
-    # Check if an AWAITING_UPLOAD meeting already exists for this zoom_meeting_id
-    existing_meeting_q = await db.execute(
-        select(Meeting).where(Meeting.zoom_meeting_id == zoom_meeting_id)
-    )
-    meeting = existing_meeting_q.scalar_one_or_none()
-
-    scheduled_at = None
-    if start_time_str:
-        try:
-            scheduled_at = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
-        except ValueError:
-            pass
-
-    if meeting:
-        meeting.recording_url = recording_url
-        meeting.zoom_recording_id = recording_id
-        meeting.status = MeetingStatus.PROCESSING
-    else:
-        meeting = Meeting(
-            id=str(uuid.uuid4()),
-            title=topic,
-            scheduled_at=scheduled_at,
-            duration_minutes=duration_minutes,
-            recording_url=recording_url,
-            status=MeetingStatus.PROCESSING,
-            team_id=host_user.team_id,
-            created_by_id=host_user.id,
-            zoom_meeting_id=zoom_meeting_id,
-            zoom_recording_id=recording_id,
-        )
-        db.add(meeting)
-
-    await db.commit()
-    await db.refresh(meeting)
-    logger.info(
-        "Recording downloaded and meeting %s queued for processing (zoom_meeting=%s)",
-        meeting.id,
-        zoom_meeting_id,
-    )
-
-    # Enqueue background processing
-    try:
-        from app.tasks.meeting_tasks import process_meeting_background
-        process_meeting_background.delay(meeting.id)
-        logger.info("Enqueued process_meeting_background for meeting %s", meeting.id)
-    except Exception as exc:
-        logger.error("Failed to enqueue processing for meeting %s: %s", meeting.id, exc)
 
 # ── Google Calendar OAuth 2.0 ─────────────────────────────────────────────────
 

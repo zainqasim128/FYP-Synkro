@@ -133,31 +133,46 @@ def decode_token(token: str) -> Optional[str]:
 
 
 # ------------------------------------------------------------
-# helper utilities for encrypting sensitive data (OAuth tokens, API
-# credentials, etc.).  In production the FERNET_KEY should live in an
-# environment variable and be rotated periodically.
+# Fernet encryption for sensitive DB fields (OAuth tokens, API credentials).
+# Uses FERNET_KEY from .env — a dedicated key separate from the JWT SECRET_KEY
+# so rotating one does not break the other.
+# Works identically for Neon (cloud) and local PostgreSQL.
 
-try:
-    from cryptography.fernet import Fernet
-    from base64 import urlsafe_b64encode
-    import hashlib
-    # Generate a proper Fernet key from SECRET_KEY
+from cryptography.fernet import Fernet, InvalidToken
+from base64 import urlsafe_b64encode
+import hashlib
+
+
+def _build_fernet() -> Fernet:
+    """Return a Fernet instance, preferring the dedicated FERNET_KEY."""
+    if settings.FERNET_KEY:
+        return Fernet(settings.FERNET_KEY.encode())
+    # Derive from SECRET_KEY as a fallback so existing encrypted data keeps working
     key_material = hashlib.sha256(settings.SECRET_KEY.encode()).digest()
-    _fernet = Fernet(urlsafe_b64encode(key_material))
-except (ImportError, Exception):
-    _fernet = None
+    return Fernet(urlsafe_b64encode(key_material))
+
+
+_fernet = _build_fernet()
 
 
 def encrypt_value(plain: str) -> str:
-    """Encrypt a string for safe storage in the database."""
-    if not _fernet:
-        # fallback to storing plaintext (not recommended)
+    """Encrypt a string before storing in the database."""
+    if not plain:
         return plain
     return _fernet.encrypt(plain.encode()).decode()
 
 
 def decrypt_value(cipher: str) -> str:
-    """Decrypt a value previously encrypted with :func:`encrypt_value`."""
-    if not _fernet:
+    """Decrypt a value stored by :func:`encrypt_value`.
+
+    Falls back to returning the raw value so rows that were saved before
+    encryption was enabled (e.g. existing Gmail app passwords) continue to
+    work without a manual migration.
+    """
+    if not cipher:
         return cipher
-    return _fernet.decrypt(cipher.encode()).decode()
+    try:
+        return _fernet.decrypt(cipher.encode()).decode()
+    except (InvalidToken, Exception):
+        # Value was stored in plaintext — return it as-is
+        return cipher
