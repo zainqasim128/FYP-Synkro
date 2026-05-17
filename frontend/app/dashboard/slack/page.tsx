@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { messagesApi, integrationsApi } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
@@ -16,7 +16,6 @@ import {
   X,
   AtSign,
   Download,
-  Trash2,
 } from 'lucide-react'
 import { formatRelativeTime } from '@/lib/utils'
 import Link from 'next/link'
@@ -29,8 +28,6 @@ interface SlackMessage {
   content: string
   timestamp: string | null
   thread_id: string | null
-  channel_id: string | null
-  external_id: string | null
   intent: string | null
   processed: boolean
 }
@@ -51,10 +48,10 @@ export default function SlackPage() {
 
   const { data: integrationsData } = useQuery({
     queryKey: ['integrations'],
-    queryFn: () => integrationsApi.getIntegrations(),
+    queryFn: () => integrationsApi.getIntegrations().then((res) => Array.isArray(res.data) ? res.data : []),
   })
 
-  const integrations: any[] = (integrationsData as any)?.data || []
+  const integrations: any[] = integrationsData || []
   const slackIntegration = integrations.find((i: any) => i.platform === 'slack')
 
   const syncMutation = useMutation({
@@ -64,17 +61,6 @@ export default function SlackPage() {
       queryClient.invalidateQueries({ queryKey: ['slack-messages'] })
       queryClient.invalidateQueries({ queryKey: ['message-stats'] })
       setTimeout(() => setSyncMsg(''), 4000)
-    },
-  })
-
-  const deleteMutation = useMutation({
-    mutationFn: (id: string) => messagesApi.deleteMessage(id),
-    onSuccess: (res: any) => {
-      queryClient.invalidateQueries({ queryKey: ['slack-messages'] })
-      queryClient.invalidateQueries({ queryKey: ['message-stats'] })
-      const slackDeleted = (res.data as any)?.slack_deleted
-      setSyncMsg(slackDeleted ? 'Message deleted from Slack and local records.' : 'Message removed from local records (Slack deletion requires bot authorship).')
-      setTimeout(() => setSyncMsg(''), 5000)
     },
   })
 
@@ -97,13 +83,6 @@ export default function SlackPage() {
   const messages = data || []
   const slackCount = stats?.slack ?? 0
 
-  // Auto-sync once when the page loads and there are no messages but integration exists
-  useEffect(() => {
-    if (slackIntegration && data !== undefined && messages.length === 0 && !syncMutation.isPending) {
-      syncMutation.mutate()
-    }
-  }, [slackIntegration?.id, data])
-
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -121,19 +100,20 @@ export default function SlackPage() {
               Direct Messages
             </Button>
           </Link>
-          <Button
-            variant="outline"
-            onClick={() => slackIntegration ? syncMutation.mutate() : undefined}
-            disabled={syncMutation.isPending || !slackIntegration}
-            title={!slackIntegration ? 'Connect Slack in Settings first' : undefined}
-          >
-            {syncMutation.isPending ? (
-              <Loader2 className="h-4 w-4 animate-spin mr-2" />
-            ) : (
-              <Download className="h-4 w-4 mr-2" />
-            )}
-            {syncMutation.isPending ? 'Syncing...' : 'Sync from Slack'}
-          </Button>
+          {slackIntegration && (
+            <Button
+              variant="outline"
+              onClick={() => syncMutation.mutate()}
+              disabled={syncMutation.isPending}
+            >
+              {syncMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin mr-2" />
+              ) : (
+                <Download className="h-4 w-4 mr-2" />
+              )}
+              {syncMutation.isPending ? 'Syncing...' : 'Sync from Slack'}
+            </Button>
+          )}
           <Button
             variant="outline"
             onClick={() => {
@@ -201,7 +181,7 @@ export default function SlackPage() {
         <Card>
           <CardContent className="p-0 divide-y">
             {messages.map((msg) => (
-              <div key={msg.id} className="px-4 py-3 hover:bg-muted/50 transition-colors flex items-start gap-3 group">
+              <div key={msg.id} className="px-4 py-3 hover:bg-muted/50 transition-colors flex items-start gap-3">
                 {/* Avatar */}
                 <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#4A154B] text-white text-xs font-bold mt-0.5">
                   {msg.sender_name
@@ -229,24 +209,10 @@ export default function SlackPage() {
                   </p>
                 </div>
 
-                {/* Time + Delete */}
-                <div className="flex items-center gap-2 shrink-0 mt-1">
-                  <span className="text-xs text-muted-foreground whitespace-nowrap">
-                    {msg.timestamp ? formatRelativeTime(msg.timestamp) : ''}
-                  </span>
-                  <button
-                    onClick={() => {
-                      if (confirm('Delete this message? It will also be removed from Slack if the bot posted it.')) {
-                        deleteMutation.mutate(msg.id)
-                      }
-                    }}
-                    disabled={deleteMutation.isPending}
-                    className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-red-500 disabled:opacity-50"
-                    title="Delete message"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
+                {/* Time */}
+                <span className="text-xs text-muted-foreground whitespace-nowrap shrink-0 mt-1">
+                  {msg.timestamp ? formatRelativeTime(msg.timestamp) : ''}
+                </span>
               </div>
             ))}
           </CardContent>

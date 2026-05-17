@@ -25,15 +25,19 @@ import {
   Bot,
   MessageSquare,
   Video,
+  Copy,
   User,
   AlertTriangle,
   BarChart2,
   CheckCircle2,
   Clock,
+  Loader2,
 } from 'lucide-react'
+import { format } from 'date-fns'
 import { formatDueDate, getStatusColor, getPriorityColor, capitalize } from '@/lib/utils'
 import type { Task } from '@/types'
 import { CreateTaskDialog } from '@/components/create-task-dialog'
+import { TaskCommentSection } from '@/components/TaskCommentSection'
 
 // ── Source type badge ─────────────────────────────────────────────────────────
 
@@ -65,7 +69,6 @@ interface WorkBalancePanelProps {
 
 function WorkBalancePanel({ tasks, members, onFilterByMember }: WorkBalancePanelProps) {
   const now = new Date()
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
 
   // Build per-member stats from tasks that have an assignee
   const stats = useMemo(() => {
@@ -76,12 +79,8 @@ function WorkBalancePanel({ tasks, members, onFilterByMember }: WorkBalancePanel
       if (!map[t.assignee_id]) map[t.assignee_id] = { name, total: 0, done: 0, overdue: 0, upcoming: 0 }
       map[t.assignee_id].total++
       if (t.status === 'done') map[t.assignee_id].done++
-      if (t.due_date && t.status !== 'done') {
-        const d = new Date(t.due_date)
-        const startOfDue = new Date(d.getFullYear(), d.getMonth(), d.getDate())
-        if (startOfDue < startOfToday) map[t.assignee_id].overdue++
-        else map[t.assignee_id].upcoming++
-      }
+      if (t.due_date && new Date(t.due_date) < now && t.status !== 'done') map[t.assignee_id].overdue++
+      if (t.due_date && new Date(t.due_date) >= now && t.status !== 'done') map[t.assignee_id].upcoming++
     }
     return Object.entries(map)
       .map(([id, s]) => ({ id, ...s, active: s.total - s.done }))
@@ -157,6 +156,15 @@ function EditTaskDialog({ task, onClose }: EditTaskDialogProps) {
   const [estimatedHours, setEstimatedHours] = useState(
     task.estimated_hours != null ? String(task.estimated_hours) : ''
   )
+  const [isMeetingTask, setIsMeetingTask] = useState(task.is_meeting_task ?? false)
+  const [meetingScheduledAt, setMeetingScheduledAt] = useState(
+    task.meeting_scheduled_at
+      ? new Date(task.meeting_scheduled_at).toISOString().slice(0, 16)
+      : ''
+  )
+  const [meetingDuration, setMeetingDuration] = useState(
+    String(task.meeting_duration_minutes ?? 60)
+  )
   const [error, setError] = useState('')
 
   const { data: teamMembers = [] } = useQuery<{ id: string; full_name: string; email: string }[]>({
@@ -197,6 +205,11 @@ function EditTaskDialog({ task, onClose }: EditTaskDialogProps) {
       priority,
       assignee_id: assigneeId || null,
       estimated_hours: estimatedHours ? parseInt(estimatedHours) : null,
+      is_meeting_task: isMeetingTask,
+      meeting_duration_minutes: parseInt(meetingDuration) || 60,
+      meeting_scheduled_at: isMeetingTask && meetingScheduledAt
+        ? new Date(meetingScheduledAt).toISOString()
+        : null,
     }
 
     if (dueDate) {
@@ -210,13 +223,13 @@ function EditTaskDialog({ task, onClose }: EditTaskDialogProps) {
 
   return (
     <Dialog open onOpenChange={(v) => { if (!v) onClose() }}>
-      <DialogContent className="sm:max-w-[540px]">
-        <form onSubmit={handleSubmit}>
-          <DialogHeader>
+      <DialogContent className="sm:max-w-[540px] max-h-[90vh] flex flex-col">
+        <form onSubmit={handleSubmit} className="flex flex-col min-h-0 flex-1">
+          <DialogHeader className="shrink-0">
             <DialogTitle>Edit Task</DialogTitle>
           </DialogHeader>
 
-          <div className="grid gap-4 py-4">
+          <div className="grid gap-4 py-4 overflow-y-auto flex-1 pr-1">
             {error && (
               <div className="rounded-md bg-red-50 dark:bg-red-950 p-3 text-sm text-red-600 dark:text-red-400">
                 {error}
@@ -320,9 +333,89 @@ function EditTaskDialog({ task, onClose }: EditTaskDialogProps) {
                 />
               </div>
             </div>
+
+            {/* Meeting toggle */}
+            <div className="flex items-center gap-3">
+              <input
+                id="edit-is-meeting"
+                type="checkbox"
+                checked={isMeetingTask}
+                onChange={(e) => setIsMeetingTask(e.target.checked)}
+                className="h-4 w-4 rounded border-input"
+              />
+              <Label htmlFor="edit-is-meeting" className="cursor-pointer flex items-center gap-1.5">
+                <Video className="h-3.5 w-3.5 text-muted-foreground" />
+                Schedule as meeting
+              </Label>
+            </div>
+
+            {/* Existing Meet link (read-only info) */}
+            {task.google_meet_link && (
+              <div className="flex items-center gap-2 rounded-lg border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950 px-3 py-2 text-sm">
+                <Video className="h-4 w-4 text-green-600 dark:text-green-400 shrink-0" />
+                <span className="text-green-700 dark:text-green-300 font-medium truncate flex-1">
+                  Meet link active
+                </span>
+                <a
+                  href={task.google_meet_link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-green-600 dark:text-green-400 hover:underline shrink-0"
+                >
+                  Open
+                </a>
+                <button
+                  type="button"
+                  title="Copy Meet link"
+                  className="text-green-600 dark:text-green-400 hover:text-green-800 dark:hover:text-green-200 shrink-0"
+                  onClick={() => navigator.clipboard.writeText(task.google_meet_link!)}
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* Meeting date + duration fields */}
+            {isMeetingTask && (
+              <div className="grid gap-4 sm:grid-cols-2 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/30 p-3">
+                <div className="space-y-2">
+                  <Label htmlFor="edit-meeting-at">Meeting Date &amp; Time</Label>
+                  <Input
+                    id="edit-meeting-at"
+                    type="datetime-local"
+                    value={meetingScheduledAt}
+                    onChange={(e) => setMeetingScheduledAt(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="edit-meeting-dur">Duration</Label>
+                  <select
+                    id="edit-meeting-dur"
+                    value={meetingDuration}
+                    onChange={(e) => setMeetingDuration(e.target.value)}
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <option value="15">15 min</option>
+                    <option value="30">30 min</option>
+                    <option value="45">45 min</option>
+                    <option value="60">60 min</option>
+                    <option value="90">90 min</option>
+                    <option value="120">120 min</option>
+                  </select>
+                </div>
+              </div>
+            )}
+
+            {/* Comments */}
+            <div className="border-t pt-4">
+              <TaskCommentSection
+                taskId={task.id}
+                currentUserId={currentUser?.id ?? ''}
+              />
+            </div>
           </div>
 
-          <DialogFooter>
+          <DialogFooter className="shrink-0 pt-2">
             <Button type="button" variant="outline" onClick={onClose}>
               Cancel
             </Button>
@@ -393,6 +486,14 @@ export default function TasksPage() {
     },
   })
 
+  // Generate Meet link for a task
+  const generateMeetMutation = useMutation({
+    mutationFn: (taskId: string) => taskApi.generateMeetLink(taskId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tasks'] })
+    },
+  })
+
   // Quick status update (cycle through all 4 statuses)
   const updateStatusMutation = useMutation({
     mutationFn: ({ id, status, priority }: { id: string; status?: string; priority?: string }) =>
@@ -434,13 +535,9 @@ export default function TasksPage() {
   )
 
   const now = new Date()
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  const overdueTasks = filteredTasks.filter((t) => {
-    if (!t.due_date || t.status === 'done') return false
-    const d = new Date(t.due_date)
-    const startOfDue = new Date(d.getFullYear(), d.getMonth(), d.getDate())
-    return startOfDue < startOfToday
-  })
+  const overdueTasks = filteredTasks.filter(
+    (t) => t.due_date && new Date(t.due_date) < now && t.status !== 'done'
+  )
 
   // Cycle status: todo → in_progress → done → todo
   const cycleStatus = (task: Task) => {
@@ -589,12 +686,7 @@ export default function TasksPage() {
       ) : (
         <div className="overflow-y-auto max-h-[calc(100vh-380px)] pr-1 space-y-2 scrollbar-thin">
           {filteredTasks.map((task) => {
-            const isOverdue = (() => {
-              if (!task.due_date || task.status === 'done') return false
-              const d = new Date(task.due_date)
-              const startOfDue = new Date(d.getFullYear(), d.getMonth(), d.getDate())
-              return startOfDue < startOfToday
-            })()
+            const isOverdue = task.due_date && new Date(task.due_date) < now && task.status !== 'done'
             return (
               <Card
                 key={task.id}
@@ -689,23 +781,83 @@ export default function TasksPage() {
 
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                       <SourceBadge type={task.source_type} />
-                      {task.due_date && (
+                      {task.meeting_scheduled_at ? (
+                        <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400 font-medium">
+                          <Video className="h-3 w-3" />
+                          {format(new Date(task.meeting_scheduled_at), 'MMM d, h:mm a')}
+                          {task.meeting_duration_minutes ? ` · ${task.meeting_duration_minutes} min` : ''}
+                        </span>
+                      ) : task.is_meeting_task && task.due_date ? (
+                        <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400 font-medium">
+                          <Video className="h-3 w-3" />
+                          {format(new Date(task.due_date), 'MMM d')}
+                          {task.meeting_duration_minutes ? ` · ${task.meeting_duration_minutes} min` : ''}
+                        </span>
+                      ) : task.due_date ? (
                         <span className={`flex items-center gap-1 ${isOverdue ? 'text-red-500 font-semibold' : ''}`}>
                           {isOverdue ? (
                             <AlertTriangle className="h-3 w-3" />
                           ) : (
                             <Clock className="h-3 w-3" />
                           )}
+                          {isOverdue ? 'Overdue: ' : 'Due '}
                           {formatDueDate(task.due_date)}
                         </span>
-                      )}
+                      ) : null}
                       {task.estimated_hours != null && (
                         <span>{task.estimated_hours}h est.</span>
                       )}
                       {task.external_id && (
                         <span className="text-blue-500 truncate max-w-[100px]">Jira: {task.external_id}</span>
                       )}
+                      {task.jira_synced_at && (
+                        <span
+                          className="text-xs text-muted-foreground"
+                          title={`Synced from Jira: ${task.jira_synced_at}`}
+                        >
+                          ↻ {format(new Date(task.jira_synced_at), 'MMM d, HH:mm')}
+                        </span>
+                      )}
                     </div>
+
+                    {/* Google Meet section */}
+                    {task.google_meet_link ? (
+                      <div className="flex items-center gap-2 mt-2">
+                        <a
+                          href={task.google_meet_link}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 rounded-full bg-green-100 dark:bg-green-950 border border-green-300 dark:border-green-700 px-3 py-1 text-xs font-semibold text-green-700 dark:text-green-300 hover:bg-green-200 dark:hover:bg-green-900 transition-colors"
+                        >
+                          <Video className="h-3.5 w-3.5" />
+                          Join Meeting
+                        </a>
+                        <button
+                          title="Copy Meet link"
+                          className="text-muted-foreground hover:text-foreground transition-colors"
+                          onClick={() => navigator.clipboard.writeText(task.google_meet_link!)}
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ) : task.is_meeting_task ? (
+                      <div className="mt-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs gap-1.5"
+                          disabled={generateMeetMutation.isPending}
+                          onClick={() => generateMeetMutation.mutate(task.id)}
+                        >
+                          {generateMeetMutation.isPending ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Video className="h-3.5 w-3.5" />
+                          )}
+                          Generate Meet Link
+                        </Button>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </Card>

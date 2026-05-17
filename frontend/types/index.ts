@@ -58,12 +58,43 @@ export interface Task {
   source_type: 'manual' | 'meeting' | 'message' | 'ai';
   source_id?: string;
   external_id?: string;
+  jira_synced_at?: string;
+  jira_sync_error?: string;
   calendar_event_id?: string;
   calendar_synced_at?: string;
+  is_meeting_task: boolean;
+  google_meet_link?: string | null;
+  meeting_scheduled_at?: string | null;
+  meeting_duration_minutes: number;
   created_at: string;
   updated_at?: string;
   assignee?: Partial<User>;
   creator?: Partial<User>;
+}
+
+export interface TaskComment {
+  id: string
+  task_id: string
+  body: string
+  author_id?: string
+  author_name?: string
+  jira_comment_id?: string
+  jira_author_name?: string
+  source: 'synkro' | 'jira'
+  created_at: string
+  updated_at?: string
+}
+
+export type NotificationType = 'task_assigned' | 'task_status_changed' | 'meeting_completed' | 'comment_added'
+
+export interface Notification {
+  id: string
+  type: NotificationType
+  title: string
+  body?: string
+  link?: string
+  is_read: boolean
+  created_at: string
 }
 
 export interface TaskStats {
@@ -110,6 +141,8 @@ export interface Meeting {
   created_at: string;
   updated_at?: string;
   action_items: ActionItem[];
+  zoom_meeting_id?: string;
+  zoom_recording_id?: string;
   calendar_event_id?: string;
   google_meet_link?: string;
 }
@@ -177,11 +210,51 @@ export interface TokenResponse {
 // Integration types
 export interface Integration {
   id: string;
-  platform: 'gmail' | 'slack' | 'google_calendar' | 'jira' | 'microsoft_teams';
+  platform: 'gmail' | 'slack' | 'google_calendar' | 'jira' | 'microsoft_teams' | 'zoom';
   is_active: boolean;
   last_synced_at?: string;
   created_at: string;
   metadata: Record<string, any>;
+}
+
+export interface JiraProject {
+  id: string;
+  key: string;
+  name: string;
+}
+
+export interface JiraUser {
+  account_id: string;
+  display_name: string;
+  email?: string;
+}
+
+export interface JiraSyncedTaskItem {
+  id: string;
+  title: string;
+  status: 'todo' | 'in_progress' | 'done' | 'blocked';
+  priority: 'low' | 'medium' | 'high' | 'urgent';
+  external_id: string;
+  jira_url?: string;
+  jira_synced_at?: string;
+  jira_sync_error?: string;
+  assignee_id?: string;
+  assignee_name?: string;
+}
+
+export interface JiraSyncedTasksResponse {
+  tasks: JiraSyncedTaskItem[];
+  total: number;
+  synced_today: number;
+  failed: number;
+}
+
+export interface JiraReSyncResult {
+  task_id: string;
+  status: 'created' | 'updated' | 'error';
+  jira_key?: string;
+  jira_url?: string;
+  error?: string;
 }
 
 // Analytics types
@@ -252,4 +325,23 @@ export interface AdminTeamResponse {
   team_id: string;
   total: number;
   users: AdminTeamUser[];
+}
+
+export interface TeamInvitation {
+  id: string;
+  email: string | null;
+  role: UserRole;
+  token: string;
+  expires_at: string;
+  used_at: string | null;
+  created_at: string;
+  invited_by_name: string | null;
+}
+
+export interface InviteValidateResponse {
+  valid: boolean;
+  team_name?: string;
+  role?: UserRole;
+  email?: string;
+  expires_at?: string;
 }

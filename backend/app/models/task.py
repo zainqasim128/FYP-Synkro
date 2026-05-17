@@ -1,5 +1,5 @@
 """Task model - represents a work item"""
-from sqlalchemy import Column, String, Text, Integer, DateTime, ForeignKey, Enum as SQLEnum, Index
+from sqlalchemy import Column, String, Text, Integer, Boolean, DateTime, ForeignKey, Enum as SQLEnum, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
@@ -62,6 +62,19 @@ class Task(Base):
     # Google Calendar sync
     calendar_event_id = Column(String(500), nullable=True)
     calendar_synced_at = Column(DateTime, nullable=True)
+
+    # Google Meet auto-generation
+    is_meeting_task = Column(Boolean, default=False, nullable=False, server_default="false")
+    google_meet_link = Column(String(500), nullable=True)
+    meeting_scheduled_at = Column(DateTime, nullable=True)
+    meeting_duration_minutes = Column(Integer, default=60, nullable=False, server_default="60")
+
+    # Jira bi-directional sync
+    jira_synced_at = Column(DateTime, nullable=True)
+    jira_sync_error = Column(Text, nullable=True)
+
+    # Comments (Synkro + Jira-synced)
+    comments = relationship("TaskComment", back_populates="task", cascade="all, delete-orphan", order_by="TaskComment.created_at")
 
     # Indexes for common queries
     __table_args__ = (

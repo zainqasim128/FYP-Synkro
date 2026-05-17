@@ -3,8 +3,9 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { meetingApi, authApi } from '@/lib/api'
-import { Meeting, ActionItem, DiarizedSegment, ContextType } from '@/types'
+import { meetingApi, authApi, integrationsApi } from '@/lib/api'
+import { Meeting, ActionItem, DiarizedSegment, ContextType, Integration } from '@/types'
+import JiraSyncPanel from '@/components/JiraSyncPanel'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -116,6 +117,13 @@ export default function MeetingDetailPage() {
       return data
     },
   })
+
+  const { data: integrations = [] } = useQuery<Integration[]>({
+    queryKey: ['integrations'],
+    queryFn: () => integrationsApi.getIntegrations().then((res) => Array.isArray(res.data) ? res.data : []),
+    staleTime: 60_000,
+  })
+  const jiraIntegration = integrations.find((i) => i.platform === 'jira')
 
   // Initialise speaker names from persisted data when meeting loads
   useEffect(() => {
@@ -308,6 +316,14 @@ export default function MeetingDetailPage() {
                 {meeting.duration_minutes} min
               </span>
             )}
+            {meeting.zoom_meeting_id && (
+              <Badge variant="outline" className="text-xs font-normal">
+                <svg className="w-3 h-3 mr-1 text-blue-500" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M24 12c0 6.627-5.373 12-12 12S0 18.627 0 12 5.373 0 12 0s12 5.373 12 12zm-7.5-4.5H9A1.5 1.5 0 007.5 9v6A1.5 1.5 0 009 16.5h7.5A1.5 1.5 0 0018 15V9a1.5 1.5 0 00-1.5-1.5zm4.125 1.781l-3.375 2.25v1.938l3.375 2.25a.375.375 0 00.375-.375V9.657a.375.375 0 00-.375-.376z" />
+                </svg>
+                Auto-imported from Zoom
+              </Badge>
+            )}
             {meeting.google_meet_link ? (
               <a
                 href={meeting.google_meet_link}
@@ -337,7 +353,7 @@ export default function MeetingDetailPage() {
         <Badge variant={statusInfo.variant}>{statusInfo.label}</Badge>
       </div>
 
-      {/* Awaiting upload banner */}
+      {/* Awaiting upload banner (Zoom Track B) */}
       {meeting.status === 'awaiting_upload' && (
         <Card className="border-yellow-300 bg-yellow-50 dark:border-yellow-700 dark:bg-yellow-950">
           <CardContent className="flex items-center justify-between gap-3 py-4">
@@ -354,7 +370,7 @@ export default function MeetingDetailPage() {
                 <p className="text-sm text-yellow-700 dark:text-yellow-400">
                   {uploadToMeetingMutation.isPending
                     ? 'Uploading your recording. Transcription will start automatically.'
-                    : 'Pick the local recording file to start transcription.'}
+                    : <>Your Zoom meeting has ended. Pick the local recording file to start transcription. Check <span className="font-mono">~/Documents/Zoom/</span></>}
                 </p>
                 {uploadError && (
                   <p className="text-sm text-red-600 dark:text-red-400 mt-1">{uploadError}</p>
@@ -854,6 +870,14 @@ export default function MeetingDetailPage() {
                     ))}
                   </CardContent>
                 </Card>
+              )}
+
+              {/* Jira push panel — only when Jira is connected and there are converted tasks */}
+              {jiraIntegration && convertedItems.length > 0 && (
+                <JiraSyncPanel
+                  convertedItems={convertedItems}
+                  jiraDomain={jiraIntegration.metadata?.domain}
+                />
               )}
 
               {/* Rejected items */}

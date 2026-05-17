@@ -20,8 +20,8 @@ router = APIRouter(prefix="/api/emails", tags=["Emails"])
 
 @router.post("/sync")
 async def sync_emails(
-    limit: int = Query(default=50, le=50),
-    days: int = Query(default=15, le=30),
+    limit: int = Query(default=30, le=50),
+    days: int = Query(default=7, le=30),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -64,6 +64,7 @@ async def sync_emails(
     new_count = 0
     tasks_created = 0
     new_email_ids: list[tuple[str, dict]] = []  # (email_db_id, raw_email)
+    created_tasks: list[Task] = []
 
     for raw in raw_emails:
         # Normalize Message-ID: strip any whitespace/newlines from header folding
@@ -152,6 +153,7 @@ async def sync_emails(
                     source_id=email_db_id,
                 )
                 db.add(new_task)
+                created_tasks.append(new_task)
                 tasks_created += 1
         except Exception as e:
             logger.warning(f"Failed to extract task from email {email_db_id}: {e}")
@@ -159,6 +161,59 @@ async def sync_emails(
 
     if tasks_created:
         await db.commit()
+        for t in created_tasks:
+            await db.refresh(t)
+
+    # Auto-push to Jira if the team has auto_jira_sync enabled
+    if created_tasks:
+        try:
+            from app.services.jira_service import JiraService
+            team_user_ids_result = await db.execute(
+                select(User.id).where(User.team_id == current_user.team_id)
+            )
+            team_user_ids = [row[0] for row in team_user_ids_result.all()]
+            jira_int_result = await db.execute(
+                select(Integration).where(
+                    Integration.user_id.in_(team_user_ids),
+                    Integration.platform == IntegrationPlatform.JIRA,
+                    Integration.is_active == True,
+                ).limit(1)
+            )
+            jira_int = jira_int_result.scalar_one_or_none()
+            if jira_int and (jira_int.platform_metadata or {}).get("auto_jira_sync"):
+                meta = jira_int.platform_metadata or {}
+                project_key = meta.get("project_key", "PROJ")
+                user_map: dict = meta.get("user_map", {})
+                jira = JiraService.from_integration(jira_int)
+                try:
+                    sprint_id = None
+                    if meta.get("assign_to_sprint"):
+                        try:
+                            sprint_id = await jira.get_active_sprint_id(project_key)
+                        except Exception as _sp:
+                            logger.warning("Could not fetch active sprint for email sync: %s", _sp)
+                    for t in created_tasks:
+                        try:
+                            jira_account_id = user_map.get(t.assignee_id or "")
+                            extra_fields = {"assignee": {"accountId": jira_account_id}} if jira_account_id else {}
+                            due_str = t.due_date.strftime("%Y-%m-%d") if t.due_date else None
+                            result_issue = await jira.create_issue(
+                                project_key=project_key,
+                                summary=t.title,
+                                description=t.description,
+                                priority=t.priority.value if t.priority else "medium",
+                                duedate=due_str,
+                                sprint_id=sprint_id,
+                                extra_fields=extra_fields or None,
+                            )
+                            t.external_id = result_issue.get("key")
+                        except Exception as _e:
+                            logger.warning("Auto Jira sync failed for email task %s: %s", t.id, _e)
+                    await db.commit()
+                finally:
+                    await jira.aclose()
+        except Exception as _e:
+            logger.error("Auto Jira sync batch failed for email sync: %s", _e)
 
     logger.info(f"Synced {new_count} new emails, auto-created {tasks_created} tasks for user {current_user.id}")
 

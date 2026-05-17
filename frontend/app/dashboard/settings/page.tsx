@@ -12,10 +12,11 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Mail, Link2, Link2Off, RefreshCw, Loader2, CheckCircle2, XCircle,
-  AlertCircle, Users, Shield, UserCheck, UserX, Trash2, Calendar, ChevronDown, ChevronUp
+  AlertCircle, Users, Shield, UserCheck, UserX, Trash2, Calendar, ChevronDown, ChevronUp,
+  UserPlus, Copy, Check, Clock
 } from 'lucide-react'
 import { Switch } from '@/components/ui/switch'
-import type { Integration, AdminUserStats, AdminTeamResponse, AdminTeamUser, UserRole } from '@/types'
+import type { Integration, AdminUserStats, AdminTeamResponse, AdminTeamUser, UserRole, TeamInvitation, JiraProject, JiraUser } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
 import { ROLE_LABELS } from '@/types'
 
@@ -48,6 +49,15 @@ export default function SettingsPage() {
   const [jiraApiToken, setJiraApiToken] = useState('')
   const [jiraProjectKey, setJiraProjectKey] = useState('')
   const [showGCalPrefs, setShowGCalPrefs] = useState(false)
+  const [showJiraSettings, setShowJiraSettings] = useState(false)
+  const [jiraSelectedProject, setJiraSelectedProject] = useState('')
+  const [jiraUserMap, setJiraUserMap] = useState<Record<string, string>>({})
+  const [autoJiraSync, setAutoJiraSync] = useState(false)
+  const [assignToSprint, setAssignToSprint] = useState(false)
+  const [showInviteForm, setShowInviteForm] = useState(false)
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [inviteRole, setInviteRole] = useState<UserRole>('developer')
+  const [copiedToken, setCopiedToken] = useState<string | null>(null)
 
   const isAdmin = user?.role === 'admin'
 
@@ -72,12 +82,22 @@ export default function SettingsPage() {
   // Fetch integrations
   const { data: integrations = [], isLoading: integrationsLoading } = useQuery<Integration[]>({
     queryKey: ['integrations'],
-    queryFn: () => integrationsApi.getIntegrations().then((res) => res.data),
+    queryFn: () => integrationsApi.getIntegrations().then((res) => Array.isArray(res.data) ? res.data : []),
   })
   const gmailIntegration = integrations.find((i) => i.platform === 'gmail')
   const slackIntegration = integrations.find((i) => i.platform === 'slack')
   const jiraIntegration = integrations.find((i) => i.platform === 'jira')
   const gcalIntegration = integrations.find((i) => i.platform === 'google_calendar')
+
+  // Sync Jira metadata into local state when integration loads/changes
+  useEffect(() => {
+    if (jiraIntegration) {
+      setJiraSelectedProject(jiraIntegration.metadata?.project_key || '')
+      setJiraUserMap(jiraIntegration.metadata?.user_map || {})
+      setAutoJiraSync(jiraIntegration.metadata?.auto_jira_sync ?? false)
+      setAssignToSprint(jiraIntegration.metadata?.assign_to_sprint ?? false)
+    }
+  }, [jiraIntegration?.id])
 
   // Check if Google Calendar is configured on the server
   const { data: gcalConfigData } = useQuery({
@@ -146,12 +166,11 @@ export default function SettingsPage() {
 
   // Slack OAuth start mutation
   const startSlackOAuthMutation = useMutation({
-    mutationFn: () => integrationsApi.startSlackOAuth(),
-    onSuccess: (res) => {
-      const url = res.data?.authorization_url
-      if (url) {
-        window.location.href = url
-      }
+    mutationFn: () => integrationsApi.connectSlackDemo(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['integrations'] })
+      setIntegrationMessage({ type: 'success', text: 'Slack connected successfully!' })
+      setTimeout(() => setIntegrationMessage(null), 3000)
     },
     onError: (err: any) => {
       setIntegrationMessage({
@@ -258,6 +277,57 @@ export default function SettingsPage() {
     },
   })
 
+  // Jira: project list (fetched when settings panel is open)
+  const { data: jiraProjectsList, isLoading: jiraProjectsLoading } = useQuery<JiraProject[]>({
+    queryKey: ['jira-projects'],
+    queryFn: () => integrationsApi.getJiraProjects().then((res) => res.data),
+    enabled: !!jiraIntegration && showJiraSettings,
+    staleTime: 60_000,
+  })
+
+  // Jira: users list for assignee mapping (fetched when settings panel is open)
+  const { data: jiraUsersList, isLoading: jiraUsersLoading } = useQuery<JiraUser[]>({
+    queryKey: ['jira-users'],
+    queryFn: () => integrationsApi.getJiraUsers().then((res) => res.data),
+    enabled: !!jiraIntegration && showJiraSettings,
+    staleTime: 60_000,
+  })
+
+  // Jira: team members for mapping UI (available to all users)
+  const { data: jiraTeamMembers } = useQuery<{ id: string; full_name: string; email: string }[]>({
+    queryKey: ['team-members-jira'],
+    queryFn: () => authApi.getTeamMembers().then((res) => res.data),
+    enabled: !!jiraIntegration && showJiraSettings,
+    staleTime: 60_000,
+  })
+
+  const updateJiraSettingsMutation = useMutation({
+    mutationFn: (settings: { project_key?: string; user_map?: Record<string, string>; auto_jira_sync?: boolean; assign_to_sprint?: boolean }) =>
+      integrationsApi.updateJiraSettings(settings),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['integrations'] })
+      setIntegrationMessage({ type: 'success', text: 'Jira settings saved.' })
+      setTimeout(() => setIntegrationMessage(null), 3000)
+    },
+    onError: (err: any) => {
+      setIntegrationMessage({ type: 'error', text: err.response?.data?.detail || 'Failed to save Jira settings.' })
+      setTimeout(() => setIntegrationMessage(null), 5000)
+    },
+  })
+
+  const registerWebhookMutation = useMutation({
+    mutationFn: () => integrationsApi.registerJiraWebhook(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['integrations'] })
+      setIntegrationMessage({ type: 'success', text: 'Jira webhook registered.' })
+      setTimeout(() => setIntegrationMessage(null), 3000)
+    },
+    onError: (err: any) => {
+      setIntegrationMessage({ type: 'error', text: err.response?.data?.detail || 'Failed to register webhook.' })
+      setTimeout(() => setIntegrationMessage(null), 5000)
+    },
+  })
+
   const syncAllTasksMutation = useMutation({
     mutationFn: () => calendarApi.syncAllTasks(),
     onSuccess: (res: any) => {
@@ -336,6 +406,45 @@ export default function SettingsPage() {
     },
   })
 
+  // Admin: Invitations query
+  const { data: invitationsData, refetch: refetchInvitations } = useQuery<TeamInvitation[]>({
+    queryKey: ['admin-invitations'],
+    queryFn: () => authApi.getInvitations().then((res) => res.data),
+    enabled: isAdmin,
+  })
+
+  // Admin: Create invitation mutation
+  const createInviteMutation = useMutation({
+    mutationFn: (data: { email?: string; role: string; expires_in_days: number }) =>
+      authApi.createInvite(data),
+    onSuccess: () => {
+      refetchInvitations()
+      setAdminMessage({ type: 'success', text: 'Invitation created! Copy the link below.' })
+      setShowInviteForm(false)
+      setInviteEmail('')
+      setInviteRole('developer')
+      setTimeout(() => setAdminMessage(null), 5000)
+    },
+    onError: (err: any) => {
+      setAdminMessage({ type: 'error', text: err.response?.data?.detail || 'Failed to create invitation' })
+      setTimeout(() => setAdminMessage(null), 5000)
+    },
+  })
+
+  // Admin: Revoke invitation mutation
+  const revokeInviteMutation = useMutation({
+    mutationFn: (id: string) => authApi.revokeInvitation(id),
+    onSuccess: () => {
+      refetchInvitations()
+      setAdminMessage({ type: 'success', text: 'Invitation revoked' })
+      setTimeout(() => setAdminMessage(null), 3000)
+    },
+    onError: (err: any) => {
+      setAdminMessage({ type: 'error', text: err.response?.data?.detail || 'Failed to revoke invitation' })
+      setTimeout(() => setAdminMessage(null), 5000)
+    },
+  })
+
   if (!user) return null
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -366,6 +475,13 @@ export default function SettingsPage() {
     if (confirm(`Are you sure you want to disconnect ${name}?`)) {
       disconnectMutation.mutate(integrationId)
     }
+  }
+
+  const copyInviteLink = (token: string) => {
+    const link = `${window.location.origin}/register?invite=${token}`
+    navigator.clipboard.writeText(link)
+    setCopiedToken(token)
+    setTimeout(() => setCopiedToken(null), 2000)
   }
 
   const handleDeleteUser = (userId: string, userName: string) => {
@@ -584,6 +700,139 @@ export default function SettingsPage() {
                 </div>
               </div>
             )}
+
+            {/* Team Invitations */}
+            <div className="border rounded-lg overflow-hidden">
+              <div className="flex items-center justify-between p-4 bg-muted/30">
+                <h3 className="text-sm font-medium flex items-center gap-2">
+                  <UserPlus className="h-4 w-4 text-indigo-500" />
+                  Team Invitations
+                </h3>
+                <Button
+                  size="sm"
+                  variant={showInviteForm ? 'outline' : 'default'}
+                  onClick={() => setShowInviteForm((v) => !v)}
+                >
+                  {showInviteForm ? 'Cancel' : (
+                    <>
+                      <UserPlus className="h-3.5 w-3.5 mr-1" />
+                      Invite Member
+                    </>
+                  )}
+                </Button>
+              </div>
+
+              {showInviteForm && (
+                <div className="border-t px-4 py-4 space-y-3 bg-background">
+                  <p className="text-xs text-muted-foreground">
+                    Generate a one-time invite link. The invitee registers using the link and joins your team automatically.
+                  </p>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="space-y-1">
+                      <Label htmlFor="invite-email">Email (optional)</Label>
+                      <Input
+                        id="invite-email"
+                        type="email"
+                        placeholder="colleague@company.com"
+                        value={inviteEmail}
+                        onChange={(e) => setInviteEmail(e.target.value)}
+                        disabled={createInviteMutation.isPending}
+                      />
+                      <p className="text-xs text-muted-foreground">Leave blank for an open invite</p>
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="invite-role">Role</Label>
+                      <select
+                        id="invite-role"
+                        value={inviteRole}
+                        onChange={(e) => setInviteRole(e.target.value as UserRole)}
+                        disabled={createInviteMutation.isPending}
+                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                      >
+                        {ROLE_OPTIONS.filter(r => r.value !== 'admin').map(r => (
+                          <option key={r.value} value={r.value}>{r.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    onClick={() => createInviteMutation.mutate({
+                      email: inviteEmail.trim() || undefined,
+                      role: inviteRole,
+                      expires_in_days: 7,
+                    })}
+                    disabled={createInviteMutation.isPending}
+                  >
+                    {createInviteMutation.isPending ? (
+                      <><Loader2 className="h-3.5 w-3.5 animate-spin mr-1" /> Generating...</>
+                    ) : (
+                      'Generate Invite Link'
+                    )}
+                  </Button>
+                </div>
+              )}
+
+              {/* Invitations list */}
+              <div className="divide-y">
+                {!invitationsData || invitationsData.length === 0 ? (
+                  <p className="text-xs text-muted-foreground text-center py-4">No pending invitations</p>
+                ) : (
+                  invitationsData.map((inv) => {
+                    const isExpired = new Date(inv.expires_at) < new Date()
+                    const isUsed = !!inv.used_at
+                    return (
+                      <div key={inv.id} className="flex items-center gap-3 px-4 py-3">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-medium truncate">{inv.email || 'Open invite'}</span>
+                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${getRoleBadgeColor(inv.role)}`}>
+                              {ROLE_LABELS[inv.role] || inv.role}
+                            </span>
+                            {isUsed && <span className="inline-flex items-center gap-1 text-xs text-green-600"><CheckCircle2 className="h-3 w-3" />Used</span>}
+                            {!isUsed && isExpired && <span className="inline-flex items-center gap-1 text-xs text-red-500"><XCircle className="h-3 w-3" />Expired</span>}
+                            {!isUsed && !isExpired && <span className="inline-flex items-center gap-1 text-xs text-muted-foreground"><Clock className="h-3 w-3" />Pending</span>}
+                          </div>
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            Expires {new Date(inv.expires_at).toLocaleDateString()}
+                            {inv.invited_by_name && ` · Invited by ${inv.invited_by_name}`}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {!isUsed && !isExpired && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => copyInviteLink(inv.token)}
+                              title="Copy invite link"
+                              className="h-7 text-xs"
+                            >
+                              {copiedToken === inv.token ? (
+                                <><Check className="h-3 w-3 mr-1 text-green-600" />Copied</>
+                              ) : (
+                                <><Copy className="h-3 w-3 mr-1" />Copy Link</>
+                              )}
+                            </Button>
+                          )}
+                          {!isUsed && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => revokeInviteMutation.mutate(inv.id)}
+                              disabled={revokeInviteMutation.isPending}
+                              title="Revoke invitation"
+                              className="h-7 w-7 p-0"
+                            >
+                              <Trash2 className="h-3.5 w-3.5 text-red-500" />
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })
+                )}
+              </div>
+            </div>
 
             {/* Team Members List */}
             <div>
@@ -958,6 +1207,37 @@ export default function SettingsPage() {
                         <CheckCircle2 className="h-3 w-3 mr-1" />
                         Connected
                       </Badge>
+                      {jiraIntegration.metadata?.webhook_id ? (
+                        <Badge variant="outline" className="text-green-600 border-green-600 text-xs">
+                          Webhook: Active
+                        </Badge>
+                      ) : (
+                        <div className="flex items-center gap-1">
+                          <Badge variant="outline" className="text-muted-foreground text-xs">
+                            Webhook: Inactive
+                          </Badge>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-6 px-2 text-xs"
+                            onClick={() => registerWebhookMutation.mutate()}
+                            disabled={registerWebhookMutation.isPending}
+                          >
+                            {registerWebhookMutation.isPending ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : 'Register'}
+                          </Button>
+                        </div>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setShowJiraSettings((v) => !v)}
+                        title="Configure Jira settings"
+                        className="h-8 w-8 p-0"
+                      >
+                        {showJiraSettings ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                      </Button>
                       <Button
                         variant="outline"
                         size="sm"
@@ -1089,6 +1369,133 @@ export default function SettingsPage() {
                       'Connect'
                     )}
                   </Button>
+                </div>
+              )}
+
+              {/* Jira Settings Panel — shown when connected and chevron is toggled */}
+              {jiraIntegration && showJiraSettings && (
+                <div className="border-t bg-muted/30 px-4 py-4 space-y-4">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                    Jira Settings
+                  </p>
+
+                  {/* Project picker */}
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium">Default Project</Label>
+                    <p className="text-xs text-muted-foreground">Issues will be created in this project.</p>
+                    {jiraProjectsLoading ? (
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Loader2 className="h-3 w-3 animate-spin" /> Loading projects...
+                      </div>
+                    ) : (
+                      <select
+                        value={jiraSelectedProject}
+                        onChange={(e) => setJiraSelectedProject(e.target.value)}
+                        className="flex h-9 w-full max-w-xs rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <option value="">Select a project...</option>
+                        {(jiraProjectsList || []).map((p) => (
+                          <option key={p.key} value={p.key}>{p.name} ({p.key})</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+
+                  {/* User mapping */}
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium">User Mapping</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Map each team member to their Jira account so tasks are assigned correctly.
+                    </p>
+                    {jiraUsersLoading ? (
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Loader2 className="h-3 w-3 animate-spin" /> Loading Jira users...
+                      </div>
+                    ) : (
+                      <div className="space-y-2 max-w-lg">
+                        {(jiraTeamMembers || []).map((member) => (
+                          <div key={member.id} className="flex items-center gap-3">
+                            <span className="text-sm w-36 shrink-0 truncate" title={member.email}>{member.full_name}</span>
+                            <select
+                              value={jiraUserMap[member.id] || ''}
+                              onChange={(e) => setJiraUserMap({ ...jiraUserMap, [member.id]: e.target.value })}
+                              className="flex h-8 flex-1 rounded-md border border-input bg-background px-3 py-1 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            >
+                              <option value="">— Not mapped —</option>
+                              {(jiraUsersList || []).map((u) => (
+                                <option key={u.account_id} value={u.account_id}>
+                                  {u.display_name}{u.email ? ` (${u.email})` : ''}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        ))}
+                        {(!jiraTeamMembers || jiraTeamMembers.length === 0) && (
+                          <p className="text-xs text-muted-foreground italic">No team members found.</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Auto-sync toggle */}
+                  <div className="space-y-1">
+                    <Label className="text-sm font-medium">Auto-sync New Tasks</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Automatically push tasks created from emails and meeting action items to Jira.
+                    </p>
+                    <div className="flex items-center gap-3 pt-1">
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={autoJiraSync}
+                        onClick={() => setAutoJiraSync((v) => !v)}
+                        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${autoJiraSync ? 'bg-primary' : 'bg-input'}`}
+                      >
+                        <span className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform ${autoJiraSync ? 'translate-x-4' : 'translate-x-0'}`} />
+                      </button>
+                      <span className="text-sm text-muted-foreground">{autoJiraSync ? 'Enabled' : 'Disabled'}</span>
+                    </div>
+                  </div>
+
+                  {/* Assign to active sprint toggle */}
+                  <div className="space-y-1">
+                    <Label className="text-sm font-medium">Assign to Active Sprint</Label>
+                    <p className="text-xs text-muted-foreground">
+                      When creating Jira issues, automatically add them to the currently active sprint.
+                    </p>
+                    <div className="flex items-center gap-3 pt-1">
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={assignToSprint}
+                        onClick={() => setAssignToSprint((v) => !v)}
+                        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${assignToSprint ? 'bg-primary' : 'bg-input'}`}
+                      >
+                        <span className={`pointer-events-none block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform ${assignToSprint ? 'translate-x-4' : 'translate-x-0'}`} />
+                      </button>
+                      <span className="text-sm text-muted-foreground">{assignToSprint ? 'Enabled' : 'Disabled'}</span>
+                    </div>
+                  </div>
+
+                  <div className="pt-2 border-t">
+                    <Button
+                      size="sm"
+                      onClick={() => updateJiraSettingsMutation.mutate({
+                        project_key: jiraSelectedProject || undefined,
+                        user_map: jiraUserMap,
+                        auto_jira_sync: autoJiraSync,
+                        assign_to_sprint: assignToSprint,
+                      })}
+                      disabled={updateJiraSettingsMutation.isPending}
+                      className="gap-2"
+                    >
+                      {updateJiraSettingsMutation.isPending ? (
+                        <><Loader2 className="h-4 w-4 animate-spin" /> Saving...</>
+                      ) : (
+                        'Save Settings'
+                      )}
+                    </Button>
+                  </div>
                 </div>
               )}
             </div>

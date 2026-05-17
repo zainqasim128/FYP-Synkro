@@ -14,7 +14,8 @@ class UserCreate(UserBase):
     """Schema for creating a new user"""
     password: str = Field(..., min_length=8, max_length=100)
     team_id: Optional[str] = None
-    role: Optional[str] = "developer"  # Default role is developer
+    role: Optional[str] = "developer"
+    invite_token: Optional[str] = None  # when set, overrides team and role from invitation
 
 
 class UserLogin(BaseModel):
@@ -75,3 +76,33 @@ class ResetPasswordRequest(BaseModel):
     """Schema for password reset"""
     token: str
     new_password: str = Field(..., min_length=8, max_length=100)
+
+
+class InviteCreateRequest(BaseModel):
+    """Schema for creating a team invitation"""
+    email: Optional[str] = None
+    role: str = "developer"
+    expires_in_days: int = Field(default=7, ge=1, le=30)
+
+
+class InviteValidateResponse(BaseModel):
+    """Public info returned when validating an invite token"""
+    valid: bool
+    team_name: Optional[str] = None
+    role: Optional[str] = None
+    email: Optional[str] = None
+    expires_at: Optional[datetime] = None
+
+
+class InviteResponse(BaseModel):
+    """Schema for an invitation record"""
+    id: str
+    email: Optional[str] = None
+    role: str
+    token: str
+    expires_at: datetime
+    used_at: Optional[datetime] = None
+    created_at: datetime
+    invited_by_name: Optional[str] = None
+
+    model_config = {"from_attributes": True}

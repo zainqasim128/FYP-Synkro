@@ -1,5 +1,5 @@
 """Pydantic schemas for Integration model"""
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional, Dict, Any
 
@@ -11,9 +11,9 @@ class IntegrationResponse(BaseModel):
     is_active: bool
     last_synced_at: Optional[datetime] = None
     created_at: datetime
-    metadata: Dict[str, Any] = {}
+    metadata: Dict[str, Any] = Field(default_factory=dict, alias="platform_metadata")
 
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "populate_by_name": True}
 
 
 class IntegrationSyncResponse(BaseModel):

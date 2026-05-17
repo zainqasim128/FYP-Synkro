@@ -67,8 +67,8 @@ function RoleBadge({ role }: { role: string }) {
     <span
       className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ${
         isAdmin
-          ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300'
-          : 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+          ? 'bg-purple-100 text-purple-700'
+          : 'bg-blue-100 text-blue-700'
       }`}
     >
       {isAdmin ? <ShieldCheck className="h-3 w-3" /> : <UserIcon className="h-3 w-3" />}
@@ -80,7 +80,7 @@ function RoleBadge({ role }: { role: string }) {
 function TaskLine({ line }: { line: string }) {
   const isOverdue = line.includes('⚠') || line.toLowerCase().includes('overdue')
   return (
-    <span className={isOverdue ? 'text-red-500 dark:text-red-400 font-medium' : ''}>
+    <span className={isOverdue ? 'text-red-600 font-medium' : ''}>
       {line}
     </span>
   )
@@ -195,7 +195,7 @@ export default function ChatPage() {
 
       <div className="flex-1 flex gap-4 overflow-hidden">
         {/* Chat area */}
-        <div className="flex-1 flex flex-col bg-background rounded-lg border border-border overflow-hidden">
+        <div className="flex-1 flex flex-col bg-white rounded-lg border overflow-hidden">
           {/* Messages */}
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             {messages.length === 0 ? (
@@ -220,10 +220,10 @@ export default function ChatPage() {
                     <div
                       className={`max-w-[80%] rounded-lg px-4 py-2.5 text-sm ${
                         message.role === 'user'
-                          ? 'bg-primary text-primary-foreground'
+                          ? 'bg-primary text-white'
                           : message.isError
-                          ? 'bg-red-50 text-red-800 border border-red-200 dark:bg-red-950/50 dark:text-red-300 dark:border-red-800'
-                          : 'bg-muted text-foreground border border-border'
+                          ? 'bg-red-50 text-red-800 border border-red-200'
+                          : 'bg-gray-50 text-gray-900 border border-gray-100'
                       }`}
                     >
                       {message.role === 'user' ? (
@@ -238,7 +238,7 @@ export default function ChatPage() {
                             <a
                               key={idx}
                               href={action.url}
-                              className="inline-flex items-center px-3 py-1.5 text-xs font-medium bg-background text-foreground rounded-full border border-border hover:bg-muted transition-colors shadow-sm"
+                              className="inline-flex items-center px-3 py-1.5 text-xs font-medium bg-white text-gray-700 rounded-full border hover:bg-gray-50 transition-colors shadow-sm"
                             >
                               {action.label}
                             </a>
@@ -251,8 +251,8 @@ export default function ChatPage() {
 
                 {chatMutation.isPending && (
                   <div className="flex justify-start">
-                    <div className="bg-muted border border-border rounded-lg px-4 py-2.5">
-                      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                    <div className="bg-gray-50 border border-gray-100 rounded-lg px-4 py-2.5">
+                      <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
                     </div>
                   </div>
                 )}
@@ -271,7 +271,7 @@ export default function ChatPage() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder="Ask about your tasks, deadlines, or meetings…"
-                className="flex-1 px-4 py-2 text-sm border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring bg-background text-foreground placeholder:text-muted-foreground"
+                className="flex-1 px-4 py-2 text-sm border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary bg-white"
                 disabled={chatMutation.isPending}
               />
               <Button
@@ -297,7 +297,7 @@ export default function ChatPage() {
 
         {/* Suggested queries sidebar */}
         <Card className="w-60 p-3 hidden lg:flex flex-col gap-3 overflow-y-auto">
-          <h3 className="font-semibold text-sm text-foreground">Suggested queries</h3>
+          <h3 className="font-semibold text-sm text-gray-700">Suggested queries</h3>
           {SUGGESTED_QUERIES_GROUPED.map((group) => {
             if (group.label === 'Team (Admin)' && !isAdmin) return null
             return (
@@ -310,7 +310,7 @@ export default function ChatPage() {
                     <button
                       key={idx}
                       onClick={() => handleSuggestedQuery(query)}
-                      className="w-full text-left text-xs px-2.5 py-1.5 rounded-md hover:bg-muted transition-colors text-foreground leading-snug"
+                      className="w-full text-left text-xs px-2.5 py-1.5 rounded-md hover:bg-gray-100 transition-colors text-gray-700 leading-snug"
                     >
                       {query}
                     </button>

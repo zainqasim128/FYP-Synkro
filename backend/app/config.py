@@ -21,9 +21,6 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
-    # Dedicated Fernet key for encrypting OAuth tokens / credentials at rest.
-    # Generate with: python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-    FERNET_KEY: str = ""
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://synkro:synkro123@localhost:5432/synkro"
@@ -81,6 +78,16 @@ class Settings(BaseSettings):
     SLACK_REDIRECT_URI: str = ""
     # Signing secret for Events API; used to verify incoming webhook signatures
     SLACK_SIGNING_SECRET: str = ""
+
+    # Zoom OAuth
+    ZOOM_CLIENT_ID: str = ""
+    ZOOM_CLIENT_SECRET: str = ""
+    ZOOM_REDIRECT_URI: str = "http://localhost:8000/api/integrations/zoom/callback"
+    ZOOM_WEBHOOK_SECRET_TOKEN: str = ""
+
+    # Jira webhook
+    JIRA_WEBHOOK_SECRET: str = ""
+    BACKEND_URL: str = "http://localhost:8000"
 
     # Frontend URL (used for OAuth callback redirects)
     FRONTEND_URL: str = "http://localhost:3000"

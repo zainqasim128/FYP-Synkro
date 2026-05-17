@@ -12,6 +12,9 @@ from app.models.message import Message, MessageIntent
 from app.models.email import Email
 from app.models.direct_message import DirectMessage
 from app.models.calendar_preference import CalendarPreferences
+from app.models.team_invitation import TeamInvitation
+from app.models.task_comment import TaskComment, CommentSource
+from app.models.notification import Notification, NotificationType
 
 __all__ = [
     "Team",
@@ -33,4 +36,9 @@ __all__ = [
     "Email",
     "DirectMessage",
     "CalendarPreferences",
+    "TeamInvitation",
+    "TaskComment",
+    "CommentSource",
+    "Notification",
+    "NotificationType",
 ]

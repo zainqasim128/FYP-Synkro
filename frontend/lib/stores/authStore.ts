@@ -10,7 +10,7 @@ interface AuthState {
 
   initialize: () => void
   login: (credentials: { email: string; password: string }) => Promise<void>
-  register: (data: { email: string; password: string; full_name: string; role?: UserRole; team_id?: string }) => Promise<void>
+  register: (data: { email: string; password: string; full_name: string; role?: UserRole; team_id?: string; invite_token?: string }) => Promise<void>
   logout: () => void
   fetchUser: () => Promise<void>
   clearError: () => void

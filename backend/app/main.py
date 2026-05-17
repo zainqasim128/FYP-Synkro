@@ -14,6 +14,8 @@ from app.routers import admin
 from app.routers import slack_webhooks
 from app.routers import direct_messages
 from app.routers import calendar
+from app.routers import comments
+from app.routers import notifications
 
 # Lifespan context manager for startup and shutdown events
 @asynccontextmanager
@@ -105,6 +107,8 @@ app.include_router(messages.router)
 app.include_router(admin.router)
 app.include_router(direct_messages.router)
 app.include_router(calendar.router)
+app.include_router(comments.router)
+app.include_router(notifications.router)
 
 # Root endpoint
 @app.get("/", tags=["Root"])

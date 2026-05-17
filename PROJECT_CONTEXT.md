@@ -31,20 +31,19 @@ An AI-Powered Workspace Orchestration System for software development teams.
 
 ## 1. Project Overview
 
-**Synkro** is a centralised team productivity platform designed for software development teams. It connects all the tools a team uses — meetings, tasks, Slack, Gmail, Jira, and Google Calendar — into one AI-augmented dashboard.
+**Synkro** is a centralised team productivity platform designed for software development teams. It connects all the tools a team uses — meetings, tasks, Slack, Gmail, Jira, and Zoom — into one AI-augmented dashboard.
 
 ### Core Capabilities
 
 | Area | What It Does |
 |------|-------------|
-| **Meeting Intelligence** | Upload recordings; AI transcribes, identifies speakers, classifies every utterance (task assignment, warning, decision, etc.), and extracts action items with deadlines and assignees |
-| **Task Management** | Create, assign, and track tasks across statuses and priorities; auto-convert meeting action items into assigned tasks; sync bidirectionally with Jira; auto-sync due dates to Google Calendar |
-| **Google Calendar** | OAuth 2.0 integration; auto-sync tasks and meetings as calendar events; Google Meet link generation; free/busy availability; smart slot suggestions; per-priority reminders |
+| **Meeting Intelligence** | Upload or auto-import Zoom recordings; AI transcribes, identifies speakers, classifies every utterance (task assignment, warning, decision, etc.), and extracts action items with deadlines and assignees |
+| **Task Management** | Create, assign, and track tasks across statuses and priorities; auto-convert meeting action items into assigned tasks; sync bidirectionally with Jira |
 | **Messaging** | View and search Slack channel messages; send/receive Slack DMs from within Synkro; native in-app DM system with unread count badge |
 | **Email** | Sync and read Gmail emails via IMAP App Password (no Google Cloud OAuth required) |
 | **Analytics** | Team workload charts, per-member task balance, overdue tracking, meeting insights, productivity trend |
 | **AI Chat** | Natural-language interface to query team data (tasks, meetings, workload) with suggested actions |
-| **Integrations** | Slack OAuth, Jira Cloud, Google Calendar OAuth, Gmail IMAP |
+| **Integrations** | Slack OAuth, Jira Cloud, Zoom OAuth + webhooks, Gmail IMAP |
 
 ---
 
@@ -86,7 +85,7 @@ An AI-Powered Workspace Orchestration System for software development teams.
 ```
 fypsynkro/
 ├── README.md                     Project overview and setup guide
-├── PLAN.md                       Feature roadmap
+├── PLAN.md                       Feature roadmap (39KB)
 ├── CLAUDE.md                     Claude Code context file
 ├── PROJECT_CONTEXT.md            This file
 ├── .gitignore
@@ -109,7 +108,7 @@ fypsynkro/
 │   ├── alembic/
 │   │   ├── env.py                Async SQLAlchemy Alembic env
 │   │   ├── script.py.mako
-│   │   └── versions/             9 migration files (see §11)
+│   │   └── versions/             7 migration files (see §11)
 │   │
 │   ├── app/
 │   │   ├── main.py               FastAPI app factory, middleware, router registration, lifespan
@@ -169,6 +168,10 @@ fypsynkro/
 | GET | `/roles` | — | List all roles with descriptions |
 | GET | `/admin-exists` | — | Check if an admin is already registered |
 | GET | `/team-members` | Bearer | List all users in the current user's team |
+| POST | `/invite` | Admin Bearer | Generate a one-time team invite token |
+| GET | `/invite/validate` | — | Validate an invite token; returns team name + role |
+| GET | `/invitations` | Admin Bearer | List all invitations for the admin's team |
+| DELETE | `/invitations/{id}` | Admin Bearer | Revoke an unused invitation |
 
 ### `tasks.py` — `/api/tasks`
 
@@ -186,17 +189,18 @@ fypsynkro/
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | POST | `/upload` | Admin | Upload audio file; store to S3/Cloudinary/local; queue background pipeline |
-| POST | `/{id}/upload` | Bearer | Attach recording to AWAITING_UPLOAD meeting |
+| POST | `/{id}/upload` | Bearer | Attach recording to AWAITING_UPLOAD meeting (Zoom Track B) |
 | GET | `` | Bearer | List meetings (team-scoped) with filters |
 | GET | `/{id}` | Bearer | Get meeting with `action_items` eager-loaded |
 | PATCH | `/{id}` | Bearer | Update meeting title/metadata |
 | PATCH | `/{id}/speaker-names` | Bearer | Save speaker name mappings; **auto-assigns** pending action items to matched team members as tasks |
+| GET | `/{id}/pending-assignments` | Bearer | Return pending action items with `suggested_assignee_id` pre-computed |
+| POST | `/{id}/bulk-assign` | Bearer | Batch-convert action items to tasks with explicit assignees |
 | GET | `/{id}/export` | Bearer | Download transcript or summary as plain text attachment |
 | DELETE | `/{id}` | Bearer | Delete meeting + recording file |
 | POST | `/{id}/retry` | Bearer | Re-queue failed/stuck transcription |
 | POST | `/{id}/action-items/{ai_id}/convert` | Bearer | Convert single action item → task |
 | POST | `/{id}/action-items/{ai_id}/reject` | Bearer | Reject action item |
-| POST | `/{id}/generate-meet-link` | Bearer | Generate Google Meet link via Google Calendar API and attach to meeting |
 | GET | `/whisper-status` | — | Check local Whisper availability |
 
 ### `integrations.py` — `/api/integrations`
@@ -213,25 +217,12 @@ fypsynkro/
 | POST | `/jira/connect` | Connect Jira Cloud (email + API token); validates via `/myself` |
 | GET | `/jira/test` | Verify Jira credentials |
 | GET | `/jira/projects` | List Jira projects |
-| GET | `/google-calendar/configured` | Check if Google OAuth credentials are set on server (no auth required) |
-| GET | `/google-calendar/start` | Start Google Calendar OAuth flow; return authorisation URL |
-| GET | `/google-calendar/callback` | Google Calendar OAuth callback; exchange code, store encrypted tokens |
-| GET | `/google-calendar/test` | Verify stored Google Calendar token is valid |
-| GET | `/google-calendar/diagnose` | Return raw Google API error details for debugging 403/scope issues |
+| GET | `/zoom/start` | Start Zoom OAuth flow |
+| GET | `/zoom/callback` | Zoom OAuth callback |
+| GET | `/zoom/test` | Test Zoom connection |
+| POST | `/zoom/webhook` | Zoom webhook: url_validation, meeting.ended, recording.completed |
 | POST | `/{id}/sync` | Trigger manual sync (Slack channel messages) |
 | DELETE | `/{id}` | Disconnect integration |
-
-### `calendar.py` — `/api/calendar`
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/preferences` | Get (or auto-create) user's calendar sync preferences |
-| PUT | `/preferences` | Update calendar sync preferences |
-| POST | `/sync-all` | Bulk-sync all user tasks that have due dates to Google Calendar |
-| POST | `/sync-task/{task_id}` | Manually sync a single task to Google Calendar |
-| GET | `/events` | List Google Calendar events in a date range (`start` / `end` params) |
-| GET | `/availability` | Free/busy time slots for a given date |
-| GET | `/suggest-slots` | Suggest free time slots for scheduling a task (`duration_hours`, `days_ahead` params) |
 
 ### `analytics.py` — `/api/analytics`
 
@@ -322,7 +313,7 @@ fypsynkro/
 | `team_id` | FK → `teams.id` | |
 | `created_at` / `updated_at` | DateTime | |
 
-Relationships: `team`, `assigned_tasks`, `created_tasks`, `integrations`, `messages`, `emails`, `sent_dms`, `received_dms`, `calendar_preferences`
+Relationships: `team`, `assigned_tasks`, `created_tasks`, `integrations`, `messages`, `emails`, `sent_dms`, `received_dms`
 
 ---
 
@@ -352,8 +343,6 @@ Relationships: `team`, `assigned_tasks`, `created_tasks`, `integrations`, `messa
 | `source_type` | Enum | `manual` / `meeting` / `message` / `ai` |
 | `source_id` | String(36) | nullable — ID of originating meeting/message |
 | `external_id` | String(255) | nullable — Jira issue key |
-| `calendar_event_id` | String(500) | nullable — Google Calendar event ID for upsert/delete |
-| `calendar_synced_at` | DateTime | nullable — timestamp of last successful GCal sync |
 | `assignee_id` | FK → `users.id` | nullable, indexed |
 | `created_by_id` | FK → `users.id` | nullable |
 | `team_id` | FK → `teams.id` | |
@@ -377,8 +366,8 @@ Composite indexes: `(status, assignee_id)`, `(team_id, status)`
 | `speaker_names` | Text | JSON mapping `{"Speaker A": "Alice"}` |
 | `summary` | Text | AI-generated summary |
 | `status` | Enum | `awaiting_upload` / `scheduled` / `processing` / `transcribed` / `completed` / `failed` |
-| `calendar_event_id` | String(500) | nullable — Google Calendar event ID |
-| `google_meet_link` | String(500) | nullable — Google Meet URL generated via Calendar API |
+| `zoom_meeting_id` | String(100) | nullable, indexed |
+| `zoom_recording_id` | String(100) | nullable — dedup guard |
 | `team_id` | FK → `teams.id` | |
 | `created_by_id` | FK → `users.id` | nullable |
 | `created_at` / `updated_at` | DateTime | |
@@ -397,7 +386,7 @@ Composite index: `(team_id, status)` | Relationship: `action_items` (cascade del
 | `deadline_mentioned` | DateTime | nullable — parsed via `dateparser` |
 | `confidence_score` | Float | AI confidence 0–1 |
 | `status` | Enum | `pending` / `converted` / `rejected` |
-| `speaker_label` | String(50) | nullable — e.g. `"Speaker A"` (Migration 007) |
+| `speaker_label` | String(50) | nullable — e.g. `"Speaker A"` (added Migration 007) |
 | `assigned_by` | String(255) | nullable — speaker who gave the assignment |
 | `context_type` | String(30) | nullable — `task_assignment`, `warning`, etc. |
 | `meeting_id` | FK → `meetings.id` | nullable |
@@ -469,35 +458,15 @@ Composite index: `(user_id, received_at)` | Unique: `(user_id, gmail_message_id)
 | Field | Type | Notes |
 |-------|------|-------|
 | `id` | String(36) UUID PK | |
-| `platform` | Enum | `gmail` / `slack` / `google_calendar` / `jira` / `microsoft_teams` |
+| `platform` | Enum | `gmail` / `slack` / `google_calendar` / `jira` / `microsoft_teams` / `zoom` |
 | `access_token` | String(1000) | **Fernet-encrypted at rest** |
 | `refresh_token` | String(1000) | nullable, Fernet-encrypted |
 | `expires_at` | DateTime | nullable |
 | `scope` | String(500) | nullable |
 | `is_active` | Boolean | |
-| `platform_metadata` | JSON | Slack: `{team_id, bot_user_id, authed_user_id}` · Jira: `{domain, email, account_id}` · Google Calendar: `{email}` |
+| `platform_metadata` | JSON | Slack: `{team_id, bot_user_id, authed_user_id}` · Jira: `{domain, email, account_id}` · Zoom: `{zoom_user_id, email}` |
 | `last_synced_at` | DateTime | nullable |
 | `user_id` | FK → `users.id` | |
-| `created_at` / `updated_at` | DateTime | |
-
----
-
-### `calendar_preferences` table (`app/models/calendar_preference.py`)
-
-| Field | Type | Notes |
-|-------|------|-------|
-| `id` | String(36) UUID PK | |
-| `user_id` | FK → `users.id` UNIQUE | One row per user; CASCADE delete |
-| `auto_sync_tasks` | Boolean | Default: true |
-| `auto_sync_meetings` | Boolean | Default: true |
-| `auto_sync_actions` | Boolean | Default: false |
-| `reminder_urgent_minutes` | JSON | Array of int — default `[2880, 120]` |
-| `reminder_high_minutes` | JSON | Array of int — default `[1440, 120]` |
-| `reminder_medium_minutes` | JSON | Array of int — default `[1440, 60]` |
-| `reminder_low_minutes` | JSON | Array of int — default `[360]` |
-| `daily_digest_enabled` | Boolean | Default: false |
-| `daily_digest_time` | String(5) | e.g. `"08:00"` |
-| `auto_reschedule_overdue` | Boolean | Default: false |
 | `created_at` / `updated_at` | DateTime | |
 
 ---
@@ -535,19 +504,6 @@ Enriches diarized segments with context classification:
 
 Context types: `task_assignment`, `task_completion`, `warning`, `progress_update`, `question`, `decision`, `general`
 
-### `google_calendar_service.py`
-Google Calendar API wrapper (OAuth 2.0):
-
-- `get_authorization_url(state)` — Build Google consent URL with `calendar` scope
-- `exchange_code(code)` — Exchange OAuth code for access + refresh tokens
-- `verify_connection()` — Call `GET /calendars/primary` to confirm token validity
-- `create_event(summary, start, end, description, reminders, conferenceData)` — Create calendar event with Google Meet conference data
-- `update_event(event_id, fields)` — Update existing calendar event
-- `delete_event(event_id)` — Delete calendar event
-- `list_events(time_min, time_max)` — List events in a date range
-- `get_freebusy(time_min, time_max)` — Query free/busy intervals
-- Token auto-refresh: checks `expires_at` and refreshes using stored refresh token before each request
-
 ### `jira_service.py`
 Jira Cloud REST API v3 wrapper:
 
@@ -567,6 +523,14 @@ Slack Web API wrapper:
 - Users: `get_users_list()`, `get_user_by_id(user_id)`, `get_user_by_email(email)`
 - Channels: `list_channels()`, `get_channel_history(channel_id)`
 - Verification: `verify_slack_signature(headers, body, signing_secret)` — HMAC-SHA256
+
+### `zoom_service.py`
+Zoom OAuth 2.0 wrapper:
+
+- `get_authorization_url()`, `exchange_code()`, `refresh_token()`
+- `get_user_info(access_token)` — GET `/users/me`
+- `download_recording(url, access_token)` — Download cloud recording file
+- `verify_webhook_signature(request)` — HMAC-SHA256 verification
 
 ### `gmail_service.py`
 Gmail IMAP service (no Google Cloud OAuth):
@@ -603,11 +567,10 @@ Defined in `app/config.py` as a Pydantic `Settings` class. All values are read f
 | Variable | Purpose |
 |----------|---------|
 | `SECRET_KEY` | JWT signing secret |
-| `FERNET_KEY` | **Dedicated Fernet key for encrypting OAuth tokens / credentials at rest in the DB.** Generate with: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Keep stable — changing it invalidates all stored tokens. Falls back to deriving from `SECRET_KEY` if unset (for backward compatibility). |
 | `ALGORITHM` | JWT algorithm (`HS256`) |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | 30 minutes |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | 7 days |
-| `DATABASE_URL` | `postgresql+asyncpg://...` — currently Neon (cloud); swap to `postgresql+asyncpg://user:pass@localhost:5432/synkro` for local PostgreSQL. No code changes required when switching. |
+| `DATABASE_URL` | `postgresql+asyncpg://...` |
 | `REDIS_URL` | Redis connection for Celery |
 | `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Celery broker/backend |
 | `OPENAI_API_KEY` | Paid fallback AI |
@@ -618,10 +581,8 @@ Defined in `app/config.py` as a Pydantic `Settings` class. All values are read f
 | `CLOUDINARY_CLOUD_NAME` / `CLOUDINARY_API_KEY` / `CLOUDINARY_API_SECRET` | Cloudinary storage |
 | `ALLOWED_ORIGINS` | CORS origins (JSON array) |
 | `GMAIL_EMAIL` / `GMAIL_APP_PASSWORD` | Default Gmail credentials |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth credentials (shared for Calendar) |
-| `GOOGLE_REDIRECT_URI` | General Google OAuth redirect URI |
-| `GOOGLE_CALENDAR_REDIRECT_URI` | Google Calendar-specific callback URL |
 | `SLACK_CLIENT_ID` / `SLACK_CLIENT_SECRET` / `SLACK_REDIRECT_URI` / `SLACK_SIGNING_SECRET` | Slack OAuth + Events API |
+| `ZOOM_CLIENT_ID` / `ZOOM_CLIENT_SECRET` / `ZOOM_REDIRECT_URI` / `ZOOM_WEBHOOK_SECRET_TOKEN` | Zoom OAuth + webhook |
 | `FRONTEND_URL` | Used in OAuth redirect URLs |
 | `DEMO_SLACK_TOKEN` / `DEMO_SLACK_TEAM_ID` | Demo mode: auto-provision Slack for all new users |
 
@@ -671,7 +632,6 @@ teams
  │    ├── messages (user_id FK)
  │    │    └── action_items (message_id FK)
  │    ├── emails (user_id FK)
- │    ├── calendar_preferences (user_id FK, unique 1:1)
  │    ├── sent direct_messages (sender_id FK)
  │    └── received direct_messages (recipient_id FK)
  │
@@ -693,12 +653,14 @@ All migration files are in `backend/alembic/versions/`.
 | `001_add_channel_fields_to_messages.py` | Add `channel_id` (String), `channel_type` (String) to `messages` |
 | `002_add_entities_and_external_id.py` | Add `entities` (JSON), `external_id` (String) to `messages` |
 | `003_add_direct_messages.py` | Create `direct_messages` table (sender_id, recipient_id, content, read_at, slack_ts) |
-| `004_add_zoom_integration.py` | Add `ZOOM` to `IntegrationPlatform` enum; add `AWAITING_UPLOAD` to `MeetingStatus` enum; add `zoom_meeting_id`, `zoom_recording_id` to `meetings` *(Zoom integration has since been removed from code; columns remain in DB)* |
-| `005_add_cols.py` | Add `diarized_transcript`, `speaker_names` to `meetings` |
+| `004_add_zoom_integration.py` | Add `ZOOM` to `IntegrationPlatform` enum; add `AWAITING_UPLOAD` to `MeetingStatus` enum; add `zoom_meeting_id`, `zoom_recording_id` to `meetings` |
+| `005_add_cols.py` | Miscellaneous column additions |
 | `006_add_channel_cols.py` | Additional channel-related columns |
 | `007_add_action_item_cols.py` | Add `speaker_label`, `assigned_by`, `context_type` to `action_items` |
-| `008_add_calendar_automation.py` | Add `calendar_event_id` to `meetings`; add `calendar_event_id`, `calendar_synced_at` to `tasks`; create `calendar_preferences` table |
+| `008_add_calendar_automation.py` | Google Calendar integration tables and preferences |
 | `009_add_google_meet_link.py` | Add `google_meet_link` to `meetings` |
+| `010_add_meeting_fields_to_tasks.py` | Add `is_meeting_task`, `google_meet_link`, `meeting_scheduled_at`, `meeting_duration_minutes` to `tasks` |
+| `011_add_team_invitations.py` | Create `team_invitations` table for invite-based team join flow |
 
 Run migrations: `alembic upgrade head`
 
@@ -720,15 +682,14 @@ All pages are in `frontend/app/` using Next.js App Router.
 | `/dashboard` | `dashboard/page.tsx` | Home: task stats cards, recent tasks list, recent meetings list, quick action buttons, admin user count panel |
 | `/dashboard/tasks` | `dashboard/tasks/page.tsx` | Task manager: list with status/priority/assignee filters, Work Balance Panel (admin), overdue alert, source badges, prominent assignee chip, edit/delete dialogs |
 | `/dashboard/meetings` | `dashboard/meetings/page.tsx` | Meeting list: upload form (admin), status polling every 5s, delete, retry |
-| `/dashboard/meetings/[id]` | `dashboard/meetings/[id]/page.tsx` | Meeting detail: speaker-colored diarized transcript, context classification badges, inline speaker name editor, action items with TaskAssignmentDialog, export buttons, Google Meet link badge/button |
-| `/dashboard/calendar` | `dashboard/calendar/page.tsx` | Google Calendar view: month/week calendar, Google Calendar events, task due dates, free/busy overlay, sync controls |
+| `/dashboard/meetings/[id]` | `dashboard/meetings/[id]/page.tsx` | Meeting detail: speaker-colored diarized transcript, context classification badges, inline speaker name editor, action items with TaskAssignmentDialog, export buttons |
 | `/dashboard/emails` | `dashboard/emails/page.tsx` | Gmail email list: sync button, read/flag status, email detail slide-out |
 | `/dashboard/slack` | `dashboard/slack/page.tsx` | Slack channel messages: sync, search, intent badges |
 | `/dashboard/slack/dms` | `dashboard/slack/dms/page.tsx` | Slack DMs: conversation list, send DM to Slack workspace users |
 | `/dashboard/messages` | `dashboard/messages/page.tsx` | Native in-app DMs: conversation threads, real-time-style chat UI, new conversation picker |
-| `/dashboard/chat` | `dashboard/chat/page.tsx` | AI chat: natural-language query → LLM response with context + suggested actions; full dark mode support |
+| `/dashboard/chat` | `dashboard/chat/page.tsx` | AI chat: natural-language query → LLM response with context + suggested actions |
 | `/dashboard/analytics` | `dashboard/analytics/page.tsx` | Analytics: workload stats, team workload table, meeting insights, productivity trend |
-| `/dashboard/settings` | `dashboard/settings/page.tsx` | Profile edit, integration cards (Gmail / Slack / Jira / Google Calendar), Google Calendar sync preferences panel, admin user management panel |
+| `/dashboard/settings` | `dashboard/settings/page.tsx` | Profile edit, integration cards (Gmail/Slack/Jira/Zoom), admin user management panel |
 
 ### `dashboard/layout.tsx`
 - Sidebar navigation with links to all routes
@@ -783,13 +744,12 @@ Single Axios instance (`baseURL = NEXT_PUBLIC_API_URL`, `timeout = 30s`) with tw
 | `authApi` | `register`, `login`, `refresh`, `me`, `updateProfile`, `logout`, `forgotPassword`, `resetPassword`, `getRoles`, `checkAdminExists`, `getTeamMembers` |
 | `adminApi` | `getAllUsers`, `getUserCount`, `getTeamUsers`, `updateUserRole`, `toggleUserActive`, `deleteUser`, `deleteAllUsers` |
 | `taskApi` | `getTasks(params)`, `getTask(id)`, `createTask(data)`, `updateTask(id, data)`, `deleteTask(id)`, `getStats()` |
-| `meetingApi` | `getMeetings(params)`, `getMeeting(id)`, `uploadMeeting(formData)`, `retryMeeting(id)`, `uploadToMeeting(id, formData)`, `deleteMeeting(id)`, `convertActionItem(meetingId, itemId)`, `rejectActionItem(meetingId, itemId)`, `generateMeetLink(id)`, `updateSpeakerNames(meetingId, names)`, `exportTranscript(meetingId, format)` |
-| `chatApi` | `query(message, history)`, `getHistory()` |
+| `meetingApi` | `getMeetings(params)`, `getMeeting(id)`, `uploadMeeting(formData)`, `retryMeeting(id)`, `uploadToMeeting(id, formData)`, `deleteMeeting(id)`, `convertActionItem(meetingId, itemId)`, `rejectActionItem(meetingId, itemId)`, `updateSpeakerNames(meetingId, names)`, `exportTranscript(meetingId, format)`, `getPendingAssignments(meetingId)`, `bulkAssignActionItems(meetingId, assignments)` |
+| `chatApi` | `query(message)`, `getHistory()` |
 | `emailApi` | `getEmails(params)`, `getEmail(id)`, `syncEmails(params)`, `getStats()`, `seedDemo()` |
 | `messagesApi` | `getMessages(params)`, `getStats()`, `getDmConversations()`, `getSlackUsers()`, `sendDm(payload)` |
-| `integrationsApi` | `getIntegrations()`, `connectGmail(creds)`, `startSlackOAuth()`, `connectSlackDemo()`, `connectJira(creds)`, `disconnectIntegration(id)`, `syncIntegration(id)`, `checkGCalConfigured()`, `startGCalOAuth()`, `testGCalConnection()` |
+| `integrationsApi` | `getIntegrations()`, `connectGmail(creds)`, `startSlackOAuth()`, `connectSlackDemo()`, `connectJira(creds)`, `disconnectIntegration(id)`, `syncIntegration(id)`, `startZoomOAuth()`, `testZoomConnection()` |
 | `dmApi` | `getUsers()`, `getConversations()`, `getConversation(userId)`, `sendMessage(payload)`, `getUnreadCount()`, `clearAllDms()`, `deleteMessage(id)` |
-| `calendarApi` | `getPreferences()`, `updatePreferences(prefs)`, `syncAllTasks()`, `syncTask(taskId)`, `getEvents(start, end)`, `getAvailability(date)`, `suggestSlots(durationHours, daysAhead)` |
 | `analyticsApi` | `getWorkload(days)`, `getTeamWorkload()`, `getMeetingInsights()`, `getProductivityTrend(days)` |
 
 ---
@@ -839,10 +799,10 @@ Single Axios instance (`baseURL = NEXT_PUBLIC_API_URL`, `timeout = 30s`) with tw
 | `TaskStats` | `{total, todo, in_progress, done, blocked, overdue, completion_rate}` |
 | `ContextType` | Union: 7 meeting context classification types |
 | `DiarizedSegment` | `{speaker, start, end, text, context_type?, context_details?}` |
-| `Meeting` | Full meeting including `action_items: ActionItem[]`, `diarized_transcript`, `speaker_names`, `calendar_event_id`, `google_meet_link` |
+| `Meeting` | Full meeting including `action_items: ActionItem[]`, `diarized_transcript`, `speaker_names` |
 | `ActionItem` | Action item with `speaker_label`, `assigned_by`, `context_type` |
 | `ChatQuery` / `ChatResponse` | AI chat request/response including `context_used` and `suggested_actions[]` |
-| `Integration` | Integration record — platform: `gmail \| slack \| google_calendar \| jira \| microsoft_teams` |
+| `Integration` | Integration record |
 | `WorkloadAnalytics` | Task counts and completion stats |
 | `TeamMemberWorkload` | Per-member: `active_tasks`, `completed_last_30_days`, `overdue_tasks`, `estimated_hours` |
 | `MeetingInsights` | Meeting counts and action item stats |
@@ -852,19 +812,6 @@ Single Axios instance (`baseURL = NEXT_PUBLIC_API_URL`, `timeout = 30s`) with tw
 ---
 
 ## 17. Third-Party Integrations
-
-### Google Calendar
-- **Auth:** OAuth 2.0 authorization code flow using `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`
-- **Scopes:** `https://www.googleapis.com/auth/calendar`
-- **Setup check:** `GET /api/integrations/google-calendar/configured` returns `{configured: bool}` — used to show/hide the Connect button in Settings without requiring auth
-- **Features:**
-  - Auto-sync tasks with due dates as calendar events (create / update / delete on task change)
-  - Auto-sync meetings as calendar events with scheduled time
-  - Generate Google Meet links via `conferenceData` in event creation
-  - Per-user sync preferences (which item types to sync, per-priority reminder minutes)
-  - Bulk sync: `POST /api/calendar/sync-all` syncs all outstanding tasks
-  - Free/busy query and smart slot suggestions for scheduling
-- **Token management:** Access token refreshed automatically when `expires_at` is within 5 minutes; encrypted with Fernet at rest
 
 ### Slack
 - **Auth:** OAuth 2.0 (captures both bot token and user OAuth token)
@@ -880,12 +827,20 @@ Single Axios instance (`baseURL = NEXT_PUBLIC_API_URL`, `timeout = 30s`) with tw
 - **Sync trigger:** Task create → Celery `sync_task_to_jira`; Task update → inline async sync
 - **Bidirectional:** Jira issue key stored in `task.external_id` for idempotent updates
 
+### Zoom
+- **Auth:** OAuth 2.0 authorization code flow
+- **Webhook events (HMAC-SHA256 verified):**
+  - `endpoint.url_validation` — Respond with challenge hash during setup
+  - `meeting.ended` — Create `AWAITING_UPLOAD` meeting record; send Slack DM to host with upload link (Track B)
+  - `recording.completed` — Download M4A/MP4 from cloud; store to S3/Cloudinary; queue full AI pipeline (Track A)
+- **Manual upload fallback:** User can also upload recording manually from the meeting detail page
+
 ### Gmail
 - **Auth:** IMAP with App Password (no Google Cloud project required)
 - **Features:** Connection test, fetch emails from last N days, sync to DB with per-user deduplication
 
 ### Groq (Primary AI)
-- **Models:** `whisper-large-v3-turbo` (transcription), `llama-3.3-70b-versatile` (all LLM tasks)
+- **Model used:** `whisper-large-v3-turbo` (transcription), `llama-3.3-70b-versatile` (all LLM tasks)
 - **Cost:** Free tier with rate limits
 
 ### OpenAI (Fallback AI)
@@ -1003,6 +958,13 @@ This section documents every significant feature and when/how it was implemented
 - Email sync with deduplication by `(user_id, gmail_message_id)`
 - Email list with read/flag status and full body view
 
+### Zoom Integration
+- OAuth 2.0 flow
+- Track A: `recording.completed` webhook → auto-download → pipeline
+- Track B: `meeting.ended` → AWAITING_UPLOAD state → user uploads manually
+- Zoom DM notification to host on meeting end
+- Zoom badge on meeting detail page
+
 ### Native In-App DMs
 - `direct_messages` table (Migration 003)
 - Full conversation UI with real-time-style polling
@@ -1014,21 +976,25 @@ This section documents every significant feature and when/how it was implemented
 - `/dashboard/chat` page with conversation UI
 - Backend gathers task/team/meeting context → Llama-3.3-70b
 - Response includes `context_used` metadata and `suggested_actions[]`
-- Full dark mode support for all chat UI elements
 
 ### Export Feature
 - `GET /api/meetings/{id}/export?format=txt|summary`
 - PlainTextResponse with `Content-Disposition: attachment` header
 - Download buttons in meeting detail transcript and summary tabs
 
-### Task Auto-Assignment (Meeting Speaker Name Resolution)
+### Task Auto-Assignment (Most Recent — Meeting Speaker Name Resolution)
 - `PATCH /api/meetings/{id}/speaker-names` now auto-assigns action items
 - Fuzzy match of `assignee_mentioned` or speaker display name → team member
-- `TaskAssignmentDialog` component with per-item assignee dropdowns
+- `GET /api/meetings/{id}/pending-assignments` returns items with suggested assignees
+- `POST /api/meetings/{id}/bulk-assign` batch-converts items to tasks
+
+### Task Assignment Dialog (Most Recent — UI)
+- `components/task-assignment-dialog.tsx` — popup with per-item assignee dropdowns
 - Pre-filled with AI-suggested assignees from speaker name matching
 - Auto-shows when meeting transitions `processing → completed` with pending items
+- Manual trigger via "Assign Tasks" button in Action Items tab
 
-### Enhanced Tasks Page
+### Enhanced Tasks Page (Most Recent)
 - **Work Balance Panel** (admin/PM/team-lead): per-member bar chart with active/done/overdue counts; click-to-filter
 - **Assignee filter dropdown** for admins — filter by member or "Unassigned"
 - **Overdue alert banner** — red banner counting overdue tasks
@@ -1036,58 +1002,19 @@ This section documents every significant feature and when/how it was implemented
 - Non-admin users automatically see only their own assigned tasks
 - Task query limit raised to 200; `assignee_id=unassigned` filter supported in backend
 
-### Google Calendar Integration (Most Recent)
-- OAuth 2.0 flow using `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`
-- Server-side config check (`/configured` endpoint) — shows "Setup Required" if keys missing instead of crashing
-- Auto-sync tasks with due dates → Google Calendar events (create/update/delete)
-- Auto-sync meetings → Google Calendar events with scheduled times
-- Google Meet link generation via `conferenceData` in Calendar API (`POST /api/meetings/{id}/generate-meet-link`)
-- `calendar_preferences` table (Migration 008) — per-user toggles for auto-sync and per-priority reminder minutes
-- `calendar_event_id` on both `tasks` and `meetings` for idempotent upserts
-- `google_meet_link` on `meetings` (Migration 009) — displayed as badge in meeting detail
-- `/dashboard/calendar` page — calendar view with Google Calendar events and task due dates
-- Calendar preferences panel in Settings with sync toggles and reminder configuration
-
 ### Admin Features
 - User management panel in `/dashboard/settings` (role change, activate/deactivate, delete)
 - `GET /api/admin/users/count` — breakdown by role + active status
 - Admin-only: upload meetings, create tasks, see all team tasks
 - Role-based UI rendering throughout (CreateTaskDialog, delete buttons, Work Balance Panel)
 
-### Dark Mode (UI Polish)
-- All hardcoded light-mode Tailwind classes replaced with CSS variable equivalents (`bg-background`, `text-foreground`, `bg-muted`, `border-border`, etc.)
-- Affects: chat page input/messages, meeting detail page, settings integration cards
-- Dark-aware role badges (`dark:bg-purple-900/40`, `dark:text-purple-300`)
-- Dark-aware error states and suggested action buttons
-
-### Database Encryption (Application-Level)
-Implemented Fernet symmetric encryption for all OAuth tokens and credentials stored in the `integrations` table. Works identically for both Neon (cloud) and local PostgreSQL — no code changes needed when switching between the two.
-
-**What changed:**
-- `backend/app/config.py` — added `FERNET_KEY: str = ""` setting
-- `backend/.env` — added `FERNET_KEY` (a proper Fernet key, separate from `SECRET_KEY`)
-- `backend/app/utils/security.py` — rewrote encryption section:
-  - `_build_fernet()` now uses the dedicated `FERNET_KEY` if set; falls back to SHA-256 derivation from `SECRET_KEY` for backward compatibility with any data encrypted before this change
-  - `encrypt_value()` — guards against empty strings; no silent plaintext fallback
-  - `decrypt_value()` — catches `InvalidToken` and returns the raw value if decryption fails, so existing rows that were stored as plaintext (e.g. Gmail app passwords saved before encryption) keep working without a manual data migration
-- `backend/app/routers/integrations.py` — fixed Gmail: `connect_gmail` now calls `encrypt_value(app_password)` before saving; `get_gmail_emails` now calls `decrypt_value(integration.access_token)` before using the password
-
-**Fields encrypted at rest (all via `encrypt_value` / `decrypt_value`):**
-| Integration | Field |
-|-------------|-------|
-| Gmail | `access_token` (App Password) |
-| Slack | `access_token` (bot token), `platform_metadata.user_access_token` |
-| Jira | `access_token` (API token) |
-| Google Calendar | `access_token`, `refresh_token` |
-
-**Key design decisions:**
-- `FERNET_KEY` is independent of `SECRET_KEY` so rotating the JWT secret does not break stored tokens
-- `decrypt_value` plaintext fallback is intentional — it allows zero-downtime migration of existing unencrypted rows without any DB script
-- The encryption code is DB-agnostic; switching `DATABASE_URL` from Neon to local PostgreSQL requires no changes to encryption logic
-
----
-
-### Zoom Integration — Removed
-- Previously: OAuth 2.0 flow, webhook events (`meeting.ended`, `recording.completed`), cloud recording auto-download
-- **Removed in current version.** All Zoom routes, `zoom_service.py`, Zoom env vars, and Zoom UI cards have been deleted
-- Migration `004_add_zoom_integration.py` retains `zoom_meeting_id`/`zoom_recording_id` columns in the DB (orphaned but harmless)
+### Team Invitation System (2026-05-16)
+- `POST /api/auth/invite` — admin creates a 7-day one-time invite token (optional email lock + role)
+- `GET /api/auth/invite/validate?token=` — public; validates token; returns team name + role
+- `GET /api/auth/invitations` — admin lists their team's invitations
+- `DELETE /api/auth/invitations/{id}` — admin revokes unused invite
+- `POST /api/auth/register` — now accepts `invite_token`; overrides team + role from the invitation; marks token as used
+- `backend/app/models/team_invitation.py` — new `TeamInvitation` ORM model
+- Migration 011: `team_invitations` table with token uniqueness index
+- `frontend/app/register/page.tsx` — `?invite=<token>` URL auto-validates, shows "Join [Team]" banner, locks role
+- `frontend/app/dashboard/settings/page.tsx` — admin "Team Invitations" panel with create form, pending list, copy-link, revoke

@@ -35,6 +35,12 @@ def _task_to_dict(task: Task) -> dict:
         "source_type": task.source_type.value,
         "source_id": task.source_id,
         "external_id": task.external_id,
+        "calendar_event_id": task.calendar_event_id,
+        "calendar_synced_at": task.calendar_synced_at,
+        "is_meeting_task": task.is_meeting_task,
+        "google_meet_link": task.google_meet_link,
+        "meeting_scheduled_at": task.meeting_scheduled_at,
+        "meeting_duration_minutes": task.meeting_duration_minutes,
         "created_at": task.created_at,
         "updated_at": task.updated_at,
         "assignee": {
@@ -142,6 +148,7 @@ async def create_task(
     - **estimated_hours**: Estimated hours to complete
     """
     # Validate assignee is in same team if provided
+    assignee = None
     if task_data.assignee_id:
         result = await db.execute(
             select(User).where(
@@ -163,6 +170,10 @@ async def create_task(
     if due_date is not None and hasattr(due_date, 'tzinfo') and due_date.tzinfo is not None:
         due_date = due_date.replace(tzinfo=None)
 
+    # Determine is_meeting_task: explicit flag OR keyword auto-detect
+    from app.services.google_calendar_service import GoogleCalendarService
+    is_meeting = task_data.is_meeting_task or GoogleCalendarService.is_meeting_related(task_data.title)
+
     # Create new task
     new_task = Task(
         title=task_data.title,
@@ -175,12 +186,32 @@ async def create_task(
         created_by_id=current_user.id,
         team_id=current_user.team_id,
         source_type=task_data.source_type,
-        source_id=task_data.source_id
+        source_id=task_data.source_id,
+        is_meeting_task=is_meeting,
+        meeting_scheduled_at=task_data.meeting_scheduled_at,
+        meeting_duration_minutes=task_data.meeting_duration_minutes,
     )
 
     db.add(new_task)
     await db.commit()
     await db.refresh(new_task)
+
+    # Notify assignee if task is assigned to someone other than the creator
+    if new_task.assignee_id and new_task.assignee_id != current_user.id:
+        try:
+            from app.services.notification_service import create_notification
+            from app.models.notification import NotificationType
+            await create_notification(
+                db=db,
+                user_id=new_task.assignee_id,
+                type=NotificationType.TASK_ASSIGNED,
+                title="New task assigned to you",
+                body=new_task.title,
+                link="/dashboard/tasks",
+            )
+            await db.commit()
+        except Exception as _ne:
+            logger.error("Notification failed for task assignment: %s", _ne)
 
     # Sync to Jira directly (async-safe — avoids asyncio.run() nested loop issue)
     try:
@@ -201,11 +232,14 @@ async def create_task(
         )
         jira_int = jira_int_result.scalar_one_or_none()
         if jira_int:
-            project_key = (jira_int.platform_metadata or {}).get("project_key", "PROJ")
+            _meta = jira_int.platform_metadata or {}
+            project_key = _meta.get("project_key", "PROJ")
             due_str = new_task.due_date.strftime("%Y-%m-%d") if new_task.due_date else None
             jira = JiraService.from_integration(jira_int)
             try:
-                sprint_id = await jira.get_active_sprint_id(project_key)
+                sprint_id = None
+                if _meta.get("assign_to_sprint"):
+                    sprint_id = await jira.get_active_sprint_id(project_key)
                 jira_result = await jira.create_issue(
                     project_key=project_key,
                     summary=new_task.title,
@@ -214,7 +248,7 @@ async def create_task(
                     duedate=due_str,
                     sprint_id=sprint_id,
                 )
-                new_task.external_id = jira_result.get("id")
+                new_task.external_id = jira_result.get("key")
                 await db.commit()
                 _jlog.info("Jira issue created: %s for task %s (sprint=%s)", jira_result.get("key"), new_task.id, sprint_id)
             finally:
@@ -222,8 +256,8 @@ async def create_task(
     except Exception as _e:
         logger.error("Jira sync failed for task %s: %s", new_task.id, _e)
 
-    # Sync to Google Calendar if user has GCal connected and task has a due date
-    if new_task.due_date:
+    # Sync to Google Calendar if user has GCal connected
+    if new_task.due_date or new_task.meeting_scheduled_at:
         try:
             from app.config import settings as _s
             gcal_result = await db.execute(
@@ -235,19 +269,26 @@ async def create_task(
             )
             gcal_int = gcal_result.scalar_one_or_none()
             if gcal_int:
-                from app.services.google_calendar_service import GoogleCalendarService
-                assignee_name = "Unassigned"
-                if new_task.assignee:
-                    assignee_name = new_task.assignee.full_name
                 user_tz = getattr(current_user, 'timezone', None) or "UTC"
-                event_body = GoogleCalendarService.task_to_event(new_task, assignee_name, _s.FRONTEND_URL, user_timezone=user_tz)
                 svc = GoogleCalendarService.from_integration(gcal_int)
                 try:
-                    event = await svc.create_event("primary", event_body)
-                    new_task.calendar_event_id = event.get("id")
-                    new_task.calendar_synced_at = datetime.utcnow()
-                    await db.commit()
-                    logger.info("create_task: synced task %s → GCal event %s", new_task.id, new_task.calendar_event_id)
+                    if new_task.is_meeting_task:
+                        # Create calendar event with Meet link
+                        attendees = [assignee.email] if assignee else []
+                        event_id, meet_link = await svc.create_task_meeting_event(new_task, user_tz, db=db, attendee_emails=attendees)
+                        new_task.calendar_event_id = event_id
+                        new_task.google_meet_link = meet_link
+                        new_task.calendar_synced_at = datetime.utcnow()
+                        await db.commit()
+                        logger.info("create_task: generated Meet link %s for task %s", meet_link, new_task.id)
+                    else:
+                        assignee_name = new_task.assignee.full_name if new_task.assignee else "Unassigned"
+                        event_body = GoogleCalendarService.task_to_event(new_task, assignee_name, _s.FRONTEND_URL, user_timezone=user_tz)
+                        event = await svc.create_event("primary", event_body)
+                        new_task.calendar_event_id = event.get("id")
+                        new_task.calendar_synced_at = datetime.utcnow()
+                        await db.commit()
+                        logger.info("create_task: synced task %s → GCal event %s", new_task.id, new_task.calendar_event_id)
                 finally:
                     await svc.aclose()
         except Exception as exc:
@@ -415,11 +456,29 @@ async def update_task(
     # Update fields
     update_data = task_update.model_dump(exclude_unset=True)
     old_status = task.status
+    old_assignee_id = task.assignee_id
     for field, value in update_data.items():
         setattr(task, field, value)
 
     await db.commit()
     await db.refresh(task)
+
+    # Notify new assignee when task is reassigned to someone other than the updater
+    if "assignee_id" in update_data and task.assignee_id and task.assignee_id != old_assignee_id and task.assignee_id != current_user.id:
+        try:
+            from app.services.notification_service import create_notification
+            from app.models.notification import NotificationType
+            await create_notification(
+                db=db,
+                user_id=task.assignee_id,
+                type=NotificationType.TASK_ASSIGNED,
+                title="Task assigned to you",
+                body=task.title,
+                link="/dashboard/tasks",
+            )
+            await db.commit()
+        except Exception as _ne:
+            logger.error("Notification failed for task reassignment: %s", _ne)
 
     # After commit, sync changes to Jira if integration is active
     if task.external_id:
@@ -500,11 +559,14 @@ async def update_task(
             )
             jira_int2 = jira_int2_result.scalar_one_or_none()
             if jira_int2:
-                project_key2 = (jira_int2.platform_metadata or {}).get("project_key", "PROJ")
+                _meta2 = jira_int2.platform_metadata or {}
+                project_key2 = _meta2.get("project_key", "PROJ")
                 due_str2 = task.due_date.strftime("%Y-%m-%d") if task.due_date else None
                 jira2 = JiraService.from_integration(jira_int2)
                 try:
-                    sprint_id2 = await jira2.get_active_sprint_id(project_key2)
+                    sprint_id2 = None
+                    if _meta2.get("assign_to_sprint"):
+                        sprint_id2 = await jira2.get_active_sprint_id(project_key2)
                     r2 = await jira2.create_issue(
                         project_key=project_key2,
                         summary=task.title,
@@ -513,7 +575,7 @@ async def update_task(
                         duedate=due_str2,
                         sprint_id=sprint_id2,
                     )
-                    task.external_id = r2.get("id")
+                    task.external_id = r2.get("key")
                     await db.commit()
                 finally:
                     await jira2.aclose()
@@ -523,6 +585,15 @@ async def update_task(
     # Sync to Google Calendar
     try:
         from app.config import settings as _s
+        from app.services.google_calendar_service import GoogleCalendarService
+
+        # Resolve assignee email for Calendar invites
+        _assignee_email: Optional[str] = None
+        if task.assignee_id:
+            _ae_result = await db.execute(select(User.email).where(User.id == task.assignee_id))
+            _assignee_email = _ae_result.scalar_one_or_none()
+        _attendees = [_assignee_email] if _assignee_email else []
+
         gcal_q = await db.execute(
             select(Integration).where(
                 Integration.user_id == current_user.id,
@@ -532,36 +603,69 @@ async def update_task(
         )
         gcal_int = gcal_q.scalar_one_or_none()
         if gcal_int:
-            from app.services.google_calendar_service import GoogleCalendarService
-            assignee_name = "Unassigned"
-            if task.assignee:
-                assignee_name = task.assignee.full_name
             user_tz = getattr(current_user, 'timezone', None) or "UTC"
-            if task.due_date:
-                event_body = GoogleCalendarService.task_to_event(task, assignee_name, _s.FRONTEND_URL, user_timezone=user_tz)
-                svc = GoogleCalendarService.from_integration(gcal_int)
-                try:
+            svc = GoogleCalendarService.from_integration(gcal_int)
+            try:
+                meeting_toggled_on = "is_meeting_task" in update_data and task.is_meeting_task
+                meeting_time_changed = any(k in update_data for k in ("meeting_scheduled_at", "meeting_duration_minutes"))
+                meeting_toggled_off = "is_meeting_task" in update_data and not task.is_meeting_task
+
+                if meeting_toggled_off and task.calendar_event_id:
+                    # Remove the Meet event and clear link
+                    await svc.delete_event("primary", task.calendar_event_id)
+                    task.calendar_event_id = None
+                    task.google_meet_link = None
+                    await db.commit()
+                    logger.info("update_task: removed Meet event for task %s (meeting toggled off)", task.id)
+                elif task.is_meeting_task and (meeting_toggled_on or meeting_time_changed):
+                    # Create or update Meet event
+                    if task.calendar_event_id:
+                        start = task.meeting_scheduled_at or task.due_date or datetime.utcnow()
+                        end = start + __import__('datetime').timedelta(minutes=task.meeting_duration_minutes or 60)
+                        event_body = {
+                            "summary": f"[MEETING] {task.title}",
+                            "description": task.description or "",
+                            "start": {"dateTime": start.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": user_tz},
+                            "end": {"dateTime": end.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": user_tz},
+                            "conferenceData": {
+                                "createRequest": {
+                                    "requestId": f"synkro-task-{task.id}",
+                                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                                }
+                            },
+                        }
+                        if _attendees:
+                            event_body["attendees"] = [{"email": e} for e in _attendees]
+                        updated = await svc.update_event("primary", task.calendar_event_id, event_body, params={"conferenceDataVersion": 1})
+                        if not task.google_meet_link:
+                            task.google_meet_link = updated.get("hangoutLink", "")
+                            await db.commit()
+                    else:
+                        event_id, meet_link = await svc.create_task_meeting_event(task, user_tz, db=db, attendee_emails=_attendees)
+                        task.calendar_event_id = event_id
+                        task.google_meet_link = meet_link
+                        task.calendar_synced_at = datetime.utcnow()
+                        await db.commit()
+                        logger.info("update_task: generated Meet link %s for task %s", meet_link, task.id)
+                elif task.due_date and not task.is_meeting_task:
+                    # Regular calendar sync (no Meet link)
+                    assignee_name = task.assignee.full_name if task.assignee else "Unassigned"
+                    event_body = GoogleCalendarService.task_to_event(task, assignee_name, _s.FRONTEND_URL, user_timezone=user_tz)
                     if task.calendar_event_id:
                         await svc.update_event("primary", task.calendar_event_id, event_body)
-                        logger.info("update_task: updated GCal event %s for task %s", task.calendar_event_id, task.id)
                     else:
                         event = await svc.create_event("primary", event_body)
                         task.calendar_event_id = event.get("id")
                         task.calendar_synced_at = datetime.utcnow()
                         await db.commit()
-                        logger.info("update_task: created GCal event %s for task %s", task.calendar_event_id, task.id)
-                finally:
-                    await svc.aclose()
-            elif task.calendar_event_id:
-                # due_date was removed — delete the calendar event
-                svc = GoogleCalendarService.from_integration(gcal_int)
-                try:
+                elif not task.due_date and not task.meeting_scheduled_at and task.calendar_event_id:
                     await svc.delete_event("primary", task.calendar_event_id)
                     task.calendar_event_id = None
+                    task.google_meet_link = None
                     await db.commit()
-                    logger.info("update_task: deleted GCal event for task %s (due_date removed)", task.id)
-                finally:
-                    await svc.aclose()
+                    logger.info("update_task: deleted GCal event for task %s (no date)", task.id)
+            finally:
+                await svc.aclose()
     except Exception as exc:
         logger.error("update_task: GCal sync failed for task %s: %s", task.id, exc)
 
@@ -574,6 +678,66 @@ async def update_task(
     )
     task = result.scalar_one()
 
+    return _task_to_dict(task)
+
+
+@router.post("/{task_id}/generate-meet-link", response_model=TaskResponse)
+async def generate_meet_link(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Manually generate a Google Meet link for an existing task.
+
+    Requires an active Google Calendar integration.
+    Returns the updated task with google_meet_link populated.
+    """
+    result = await db.execute(
+        select(Task).where(
+            and_(Task.id == task_id, Task.team_id == current_user.team_id)
+        ).options(selectinload(Task.assignee), selectinload(Task.creator))
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+
+    gcal_q = await db.execute(
+        select(Integration).where(
+            Integration.user_id == current_user.id,
+            Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+            Integration.is_active == True,
+        )
+    )
+    gcal_int = gcal_q.scalar_one_or_none()
+    if not gcal_int:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google Calendar not connected. Connect it in Settings first."
+        )
+
+    from app.services.google_calendar_service import GoogleCalendarService
+    user_tz = getattr(current_user, 'timezone', None) or "UTC"
+    task.is_meeting_task = True
+    _attendees = [task.assignee.email] if task.assignee else []
+    svc = GoogleCalendarService.from_integration(gcal_int)
+    try:
+        event_id, meet_link = await svc.create_task_meeting_event(task, user_tz, db=db, attendee_emails=_attendees)
+    finally:
+        await svc.aclose()
+
+    task.calendar_event_id = event_id
+    task.google_meet_link = meet_link
+    task.calendar_synced_at = datetime.utcnow()
+    await db.commit()
+    logger.info("generate_meet_link: %s for task %s", meet_link, task.id)
+
+    result = await db.execute(
+        select(Task).where(Task.id == task.id).options(
+            selectinload(Task.assignee), selectinload(Task.creator)
+        )
+    )
+    task = result.scalar_one()
     return _task_to_dict(task)
 
 

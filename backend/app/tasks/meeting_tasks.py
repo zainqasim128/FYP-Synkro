@@ -371,27 +371,6 @@ def process_message_for_intent(message_id: str):
                         db.commit()
                         return {"status": "skipped", "message_id": message_id, "reason": "no_team"}
 
-                    # Resolve assignee name → actual team member
-                    assignee_id = None
-                    raw_assignee = entities.get("assignee")
-                    if raw_assignee:
-                        # Strip leading @ and normalise
-                        clean = raw_assignee.lstrip("@").lower().strip()
-                        team_members = db.execute(
-                            select(UserModel).where(UserModel.team_id == msg_user.team_id)
-                        ).scalars().all()
-                        for member in team_members:
-                            name_lower = (member.full_name or "").lower()
-                            email_lower = (member.email or "").lower()
-                            # Match on first name, full name, or email prefix
-                            if (
-                                clean == name_lower
-                                or name_lower.startswith(clean)
-                                or email_lower.startswith(clean)
-                            ):
-                                assignee_id = member.id
-                                break
-
                     task = Task(
                         title=title,
                         description=description,
@@ -401,7 +380,6 @@ def process_message_for_intent(message_id: str):
                         source_id=message.id,
                         team_id=msg_user.team_id,
                         created_by_id=message.user_id,
-                        assignee_id=assignee_id,
                     )
                     db.add(task)
                     db.flush()  # get task.id

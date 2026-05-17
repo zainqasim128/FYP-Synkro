@@ -83,7 +83,7 @@ api.interceptors.response.use(
 
 // Auth API
 export const authApi = {
-  register: (data: { email: string; password: string; full_name: string; role?: string; team_id?: string }) =>
+  register: (data: { email: string; password: string; full_name: string; role?: string; team_id?: string; invite_token?: string }) =>
     api.post('/api/auth/register', data),
 
   login: (data: { email: string; password: string }) => {
@@ -118,6 +118,16 @@ export const authApi = {
   checkAdminExists: () => api.get('/api/auth/admin-exists'),
 
   getTeamMembers: () => api.get('/api/auth/me/team-members'),
+
+  createInvite: (data: { email?: string; role?: string; expires_in_days?: number }) =>
+    api.post('/api/auth/invite', data),
+
+  validateInvite: (token: string) =>
+    api.get('/api/auth/invite/validate', { params: { token } }),
+
+  getInvitations: () => api.get('/api/auth/invitations'),
+
+  revokeInvitation: (id: string) => api.delete(`/api/auth/invitations/${id}`),
 }
 
 // Admin API
@@ -143,6 +153,7 @@ export const taskApi = {
   updateTask: (id: string, data: Record<string, any>) => api.patch(`/api/tasks/${id}`, data),
   deleteTask: (id: string) => api.delete(`/api/tasks/${id}`),
   getStats: () => api.get('/api/tasks/stats'),
+  generateMeetLink: (taskId: string) => api.post(`/api/tasks/${taskId}/generate-meet-link`),
 }
 
 // Meeting API
@@ -197,7 +208,6 @@ export const messagesApi = {
   getSlackUsers: () => api.get('/api/messages/dms/users'),
   sendDm: (payload: { slack_user_id: string; message: string; channel_id?: string }) =>
     api.post('/api/messages/dms/send', payload),
-  deleteMessage: (id: string) => api.delete(`/api/messages/${id}`),
 }
 
 // Integrations API
@@ -209,11 +219,35 @@ export const integrationsApi = {
   connectSlackDemo: () => api.post('/api/integrations/slack/demo-connect'),
   connectJira: (credentials: { domain: string; email: string; api_token: string; project_key?: string }) =>
     api.post('/api/integrations/jira/connect', credentials),
+  getJiraProjects: () => api.get('/api/integrations/jira/projects'),
+  getJiraUsers: (query?: string) =>
+    api.get('/api/integrations/jira/users', { params: query ? { query } : {} }),
+  updateJiraSettings: (settings: { project_key?: string; user_map?: Record<string, string>; auto_jira_sync?: boolean; assign_to_sprint?: boolean }) =>
+    api.patch('/api/integrations/jira/settings', settings),
+  bulkSyncJira: (task_ids: string[]) =>
+    api.post('/api/integrations/jira/bulk-sync', { task_ids }),
+  registerJiraWebhook: () => api.post('/api/integrations/jira/register-webhook'),
+  deregisterJiraWebhook: () => api.delete('/api/integrations/jira/deregister-webhook'),
+  getSyncedJiraTasks: () => api.get('/api/integrations/jira/synced-tasks'),
+  reSyncJiraTask: (taskId: string) => api.post(`/api/integrations/jira/re-sync/${taskId}`),
+  unlinkJiraTask: (taskId: string) => api.delete(`/api/integrations/jira/unlink/${taskId}`),
+  syncAllJiraTasks: () => api.post('/api/integrations/jira/sync-all'),
   disconnectIntegration: (id: string) => api.delete(`/api/integrations/${id}`),
   syncIntegration: (id: string) => api.post(`/api/integrations/${id}/sync`),
+  startZoomOAuth: () => api.get('/api/integrations/zoom/start'),
+  testZoomConnection: () => api.get('/api/integrations/zoom/test'),
   checkGCalConfigured: () => api.get('/api/integrations/google-calendar/configured'),
   startGCalOAuth: () => api.get('/api/integrations/google-calendar/start'),
   testGCalConnection: () => api.get('/api/integrations/google-calendar/test'),
+}
+
+// Comments API
+export const commentsApi = {
+  getComments: (taskId: string) => api.get(`/api/tasks/${taskId}/comments`),
+  addComment: (taskId: string, body: string) =>
+    api.post(`/api/tasks/${taskId}/comments`, { body }),
+  deleteComment: (taskId: string, commentId: string) =>
+    api.delete(`/api/tasks/${taskId}/comments/${commentId}`),
 }
 
 // Direct Messages API
@@ -247,6 +281,13 @@ export const analyticsApi = {
   getTeamWorkload: () => api.get('/api/analytics/team-workload'),
   getMeetingInsights: (days = 30) => api.get(`/api/analytics/meeting-insights?days=${days}`),
   getProductivityTrend: (days = 14) => api.get(`/api/analytics/productivity-trend?days=${days}`),
+}
+
+export const notificationsApi = {
+  list: (params?: { unread_only?: boolean; limit?: number }) =>
+    api.get('/api/notifications', { params }),
+  markRead: (id: string) => api.patch(`/api/notifications/${id}/read`),
+  markAllRead: () => api.post('/api/notifications/mark-all-read'),
 }
 
 export default api

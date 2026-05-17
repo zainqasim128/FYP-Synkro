@@ -106,6 +106,8 @@ def sync_task_to_jira(self, task_id: str, user_id: str) -> dict:
                     fields["duedate"] = due_str
 
                 asyncio.run(jira.update_issue_fields(task.external_id, fields))
+                task.jira_sync_error = None
+                db.commit()
                 logger.info(
                     "sync_task_to_jira: updated Jira issue %s for task %s",
                     task.external_id,
@@ -125,6 +127,7 @@ def sync_task_to_jira(self, task_id: str, user_id: str) -> dict:
                     )
                 )
                 task.external_id = result.get("id")
+                task.jira_sync_error = None
                 db.commit()
                 logger.info(
                     "sync_task_to_jira: created Jira issue id=%s key=%s for task %s",
@@ -153,6 +156,8 @@ def sync_task_to_jira(self, task_id: str, user_id: str) -> dict:
                 logger.error(
                     "sync_task_to_jira: max retries exceeded for task %s", task_id
                 )
+                task.jira_sync_error = str(exc)[:500]
+                db.commit()
                 return {"error": str(exc), "task_id": task_id}
 
 
@@ -646,3 +651,75 @@ def reschedule_overdue_tasks(self) -> dict:
 
     logger.info("reschedule_overdue_tasks: moved=%d skipped=%d", moved, skipped)
     return {"moved": moved, "skipped": skipped}
+
+
+# ── Google Meet link generation (fallback) ─────────────────────────────────────
+
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.integration_tasks.generate_meet_link_for_task",
+    max_retries=3,
+    default_retry_delay=30,
+)
+def generate_meet_link_for_task(self, task_id: str, user_id: str) -> dict:
+    """Async fallback: generate a Google Meet link for a meeting task.
+
+    Queued when inline generation in the router fails (timeout, API flakiness).
+    Retries up to 3 times with exponential back-off (30s / 60s / 90s).
+    On success: stores task.google_meet_link and task.calendar_event_id.
+    """
+    from app.models.user import User as UserModel
+    from app.services.google_calendar_service import GoogleCalendarService
+
+    with Session(_sync_engine) as db:
+        task = db.execute(select(Task).where(Task.id == task_id)).scalar_one_or_none()
+        if not task:
+            logger.error("generate_meet_link_for_task: task %s not found", task_id)
+            return {"error": "task_not_found", "task_id": task_id}
+
+        gcal_int = db.execute(
+            select(Integration).where(
+                Integration.user_id == user_id,
+                Integration.platform == IntegrationPlatform.GOOGLE_CALENDAR,
+                Integration.is_active == True,
+            )
+        ).scalar_one_or_none()
+        if not gcal_int:
+            return {"skipped": "no_gcal_integration", "task_id": task_id}
+
+        cal_owner = db.execute(
+            select(UserModel).where(UserModel.id == user_id)
+        ).scalar_one_or_none()
+        user_tz = getattr(cal_owner, "timezone", None) or "UTC"
+
+        async def _generate() -> tuple:
+            svc = GoogleCalendarService.from_integration(gcal_int)
+            try:
+                return await svc.create_task_meeting_event(task, user_tz)
+            finally:
+                await svc.aclose()
+
+        try:
+            event_id, meet_link = asyncio.run(_generate())
+            task.calendar_event_id = event_id
+            task.google_meet_link = meet_link
+            task.calendar_synced_at = datetime.utcnow()
+            db.commit()
+            logger.info(
+                "generate_meet_link_for_task: %s → %s for task %s",
+                event_id, meet_link, task_id,
+            )
+            return {"event_id": event_id, "meet_link": meet_link}
+        except Exception as exc:
+            logger.error(
+                "generate_meet_link_for_task: failed for task %s (attempt %d): %s",
+                task_id, self.request.retries + 1, exc,
+            )
+            try:
+                raise self.retry(exc=exc, countdown=30 * (self.request.retries + 1))
+            except self.MaxRetriesExceededError:
+                logger.error(
+                    "generate_meet_link_for_task: max retries exceeded for task %s", task_id
+                )
+                return {"error": str(exc), "task_id": task_id}

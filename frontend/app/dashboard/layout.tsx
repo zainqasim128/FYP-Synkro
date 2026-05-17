@@ -22,11 +22,13 @@ import {
   Shield,
   AtSign,
   CalendarDays,
+  RefreshCcw,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn, getInitials, getAvatarColor } from '@/lib/utils'
 import { ROLE_LABELS } from '@/types'
 import { dmApi } from '@/lib/api'
+import NotificationBell from '@/components/NotificationBell'
 
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
@@ -38,6 +40,7 @@ const navigation = [
   { name: 'Direct Messages', href: '/dashboard/messages', icon: AtSign },
   { name: 'Chat', href: '/dashboard/chat', icon: MessageSquare },
   { name: 'Analytics', href: '/dashboard/analytics', icon: BarChart3 },
+  { name: 'Jira Sync', href: '/dashboard/integrations/jira', icon: RefreshCcw },
   { name: 'Settings', href: '/dashboard/settings', icon: Settings },
 ]
 
@@ -221,6 +224,7 @@ export default function DashboardLayout({
               <span className="text-xs font-medium text-amber-700 dark:text-amber-300">Admin</span>
             </div>
           )}
+          <NotificationBell />
           <Button
             variant="ghost"
             size="sm"

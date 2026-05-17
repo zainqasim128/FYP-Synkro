@@ -5,9 +5,10 @@ Handles OAuth 2.0 token exchange, event CRUD, and token refresh.
 Uses httpx (already in requirements) — mirrors ZoomService structure.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 import httpx
@@ -300,6 +301,64 @@ class GoogleCalendarService:
             "end": end_block,
             "reminders": GoogleCalendarService._build_reminders(priority, {}),
         }
+
+    # ── Meeting task helpers ─────────────────────────────────────────────────
+
+    _MEETING_KEYWORDS = {
+        "meeting", "standup", "stand-up", "sync", "call",
+        "review", "demo", "presentation", "interview",
+        "conference", "session", "discussion", "1:1", "one-on-one",
+    }
+
+    @classmethod
+    def is_meeting_related(cls, title: str) -> bool:
+        """Return True if the task title contains a meeting-related keyword."""
+        lower = title.lower()
+        return any(kw in lower for kw in cls._MEETING_KEYWORDS)
+
+    async def create_task_meeting_event(
+        self, task: Any, timezone: str, db: Any = None,
+        attendee_emails: Optional[List[str]] = None,
+    ) -> Tuple[str, str]:
+        """Create a Calendar event with conferenceData for a meeting task.
+
+        Returns (calendar_event_id, google_meet_link).
+        Attendees receive a Google Calendar invite email automatically.
+        """
+        start = task.meeting_scheduled_at or task.due_date
+        if start is None:
+            start = datetime.utcnow() + timedelta(days=1)
+        duration = task.meeting_duration_minutes or 60
+        end = start + timedelta(minutes=duration)
+
+        event_body: Dict[str, Any] = {
+            "summary": f"[MEETING] {task.title}",
+            "description": task.description or "",
+            "start": {"dateTime": start.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": timezone},
+            "end": {"dateTime": end.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": timezone},
+            "conferenceData": {
+                "createRequest": {
+                    "requestId": f"synkro-task-{task.id}",
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                }
+            },
+        }
+
+        if attendee_emails:
+            event_body["attendees"] = [{"email": e} for e in attendee_emails]
+
+        response = await self.create_event(
+            "primary", event_body, db=db, params={"conferenceDataVersion": 1}
+        )
+        event_id = response.get("id", "")
+        meet_link = response.get("hangoutLink", "")
+
+        if not meet_link and event_id:
+            await asyncio.sleep(2)
+            updated = await self.get_event("primary", event_id, db=db)
+            meet_link = updated.get("hangoutLink", "")
+
+        return event_id, meet_link
 
     @staticmethod
     def _build_reminders(priority: str, preferences: Dict[str, Any]) -> Dict[str, Any]:

@@ -346,10 +346,7 @@ async def extract_task_from_email(subject: str, sender: str, body: str) -> Dict[
     try:
         client, model = _get_chat_client()
 
-        today = date.today().isoformat()
         prompt = f"""You are an AI assistant that reads emails and determines whether they contain an actionable task that should be added to a task management system.
-
-Today's date: {today}
 
 Analyze this email carefully:
 
@@ -368,7 +365,7 @@ Return ONLY a valid JSON object, no other text:
   "title": "Short task title (max 100 chars)",
   "description": "Full task description including context from the email",
   "priority": "low|medium|high|urgent",
-  "due_date": "YYYY-MM-DD or null (use today's year {date.today().year} when only a day/month is given)"
+  "due_date": "YYYY-MM-DD or null (use today's year when only a day/month is given)"
 }}
 
 Or if no task:

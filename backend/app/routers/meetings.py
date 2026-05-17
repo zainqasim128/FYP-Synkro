@@ -197,6 +197,23 @@ async def process_meeting_background(meeting_id: str):
             await db.commit()
             logger.info(f"[Meeting {meeting_id}] Complete — {created_count} action items")
 
+            # Notify the uploader that the meeting has been processed
+            if meeting.created_by_id:
+                try:
+                    from app.services.notification_service import create_notification
+                    from app.models.notification import NotificationType
+                    await create_notification(
+                        db=db,
+                        user_id=meeting.created_by_id,
+                        type=NotificationType.MEETING_COMPLETED,
+                        title="Meeting processing complete",
+                        body=f'"{meeting.title}" — {created_count} action item{"s" if created_count != 1 else ""} extracted',
+                        link=f"/dashboard/meetings/{meeting_id}",
+                    )
+                    await db.commit()
+                except Exception as _ne:
+                    logger.warning("Failed to create meeting notification: %s", _ne)
+
             # ── Google Calendar + Meet sync (fire-and-forget) ─────────────────────
             if meeting.created_by_id:
                 try:
@@ -442,7 +459,7 @@ async def upload_recording_to_meeting(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Upload a recording file to an existing AWAITING_UPLOAD meeting.
+    Upload a recording file to an existing AWAITING_UPLOAD meeting (Zoom Track B).
 
     Attaches the file, transitions the meeting to PROCESSING, and enqueues
     the transcription pipeline. The meeting must belong to the current user's
@@ -960,6 +977,49 @@ async def convert_action_item_to_task(
     action_item.status = "converted"
     action_item.task_id = new_task.id
     await db.commit()
+
+    # Auto-push to Jira if the team has auto_jira_sync enabled
+    try:
+        from app.services.jira_service import JiraService
+        team_user_ids_result = await db.execute(
+            select(User.id).where(User.team_id == current_user.team_id)
+        )
+        team_user_ids = [row[0] for row in team_user_ids_result.all()]
+        jira_int_result = await db.execute(
+            select(Integration).where(
+                Integration.user_id.in_(team_user_ids),
+                Integration.platform == IntegrationPlatform.JIRA,
+                Integration.is_active == True,
+            ).limit(1)
+        )
+        jira_int = jira_int_result.scalar_one_or_none()
+        if jira_int and (jira_int.platform_metadata or {}).get("auto_jira_sync"):
+            meta = jira_int.platform_metadata or {}
+            project_key = meta.get("project_key", "PROJ")
+            user_map: dict = meta.get("user_map", {})
+            jira_account_id = user_map.get(new_task.assignee_id or "")
+            extra_fields = {"assignee": {"accountId": jira_account_id}} if jira_account_id else {}
+            due_str = new_task.due_date.strftime("%Y-%m-%d") if new_task.due_date else None
+            jira = JiraService.from_integration(jira_int)
+            try:
+                sprint_id = None
+                if meta.get("assign_to_sprint"):
+                    sprint_id = await jira.get_active_sprint_id(project_key)
+                result_issue = await jira.create_issue(
+                    project_key=project_key,
+                    summary=new_task.title,
+                    description=new_task.description,
+                    priority=new_task.priority.value if new_task.priority else "medium",
+                    duedate=due_str,
+                    sprint_id=sprint_id,
+                    extra_fields=extra_fields or None,
+                )
+                new_task.external_id = result_issue.get("key")
+                await db.commit()
+            finally:
+                await jira.aclose()
+    except Exception as _e:
+        logger.error("Auto Jira sync failed for converted task %s: %s", new_task.id, _e)
 
     return {"task_id": new_task.id, "message": "Action item converted to task successfully"}
 

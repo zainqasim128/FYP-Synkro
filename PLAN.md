@@ -1,7 +1,7 @@
 # Synkro — Project Plan Document
 
 > AI-powered team productivity platform | Final Year Project
-> Last updated: March 2026
+> Last updated: May 2026
 
 ---
 
@@ -21,6 +21,7 @@
    - 4.8 Admin Panel
    - 4.9 Dashboard Home
    - 4.10 Settings Page
+   - 4.11 Google Meet Auto-Generation for Meeting Tasks
 5. [Database Schema](#5-database-schema)
 6. [API Endpoints Reference](#6-api-endpoints-reference)
 7. [Frontend Pages & Routes](#7-frontend-pages--routes)
@@ -760,6 +761,106 @@ The current implementation uses FastAPI's built-in `BackgroundTasks`, which proc
 
 ---
 
+### 4.12 Team Invitation System
+
+**What it does:**
+Admins can generate one-time invite links for new team members. New users click the link and register directly into the team, with the role pre-assigned by the admin. This replaces the broken auto-join flow where every non-admin user was silently added to the admin's team without any invitation.
+
+**How it works — Creating an invite:**
+1. Admin goes to `/dashboard/settings` → **User Management** card → **Team Invitations** section.
+2. Clicks "Invite Member", optionally enters an email address, selects the intended role, and clicks "Generate Invite Link".
+3. Backend creates a `team_invitations` record with a cryptographically random 48-byte URL-safe token, a 7-day expiry, and the admin's team_id and chosen role.
+4. The invite appears in the Pending list with a "Copy Link" button.
+
+**How it works — Accepting an invite:**
+1. Admin clicks "Copy Link" → shares the URL (e.g. `/register?invite=<token>`) with the colleague.
+2. New user opens the link. The register page detects `?invite=` and calls `GET /api/auth/invite/validate?token=<token>`.
+3. If valid: a banner shows _"You've been invited to join [Team Name]"_ and the role selector is pre-set and locked to the invited role.
+4. User fills in name + password and submits.
+5. Backend verifies the token (not used, not expired, email matches if specified), joins the user to the team with the assigned role, and marks the token `used_at`.
+
+**Token security:**
+- 48-byte URL-safe random token (384 bits of entropy) — unguessable
+- Single-use: marked as used immediately on successful registration
+- Time-limited: 7-day expiry by default
+- Optional email-lock: if `email` is set on the invite, only that email can use it
+- Admin can revoke (delete) any unused invitation
+
+**New DB table (`team_invitations`, migration 011):**
+| Column | Type | Purpose |
+|---|---|---|
+| `id` | UUID PK | |
+| `team_id` | FK → teams.id | Team the invitee joins |
+| `email` | VARCHAR nullable | Optional email lock |
+| `role` | Enum | Role assigned to new user |
+| `token` | VARCHAR unique | The invite token |
+| `invited_by_id` | FK → users.id | Admin who created it |
+| `expires_at` | DateTime | Invite validity window |
+| `used_at` | DateTime nullable | Set when consumed |
+
+**Files:**
+- [backend/alembic/versions/011_add_team_invitations.py](backend/alembic/versions/011_add_team_invitations.py) — migration
+- [backend/app/models/team_invitation.py](backend/app/models/team_invitation.py) — ORM model
+- [backend/app/schemas/user.py](backend/app/schemas/user.py) — `InviteCreateRequest`, `InviteValidateResponse`, `InviteResponse`
+- [backend/app/routers/auth.py](backend/app/routers/auth.py) — `POST /invite`, `GET /invite/validate`, `GET /invitations`, `DELETE /invitations/{id}`; modified `POST /register` to accept `invite_token`
+- [frontend/types/index.ts](frontend/types/index.ts) — `TeamInvitation`, `InviteValidateResponse`
+- [frontend/lib/api.ts](frontend/lib/api.ts) — `createInvite`, `validateInvite`, `getInvitations`, `revokeInvitation`
+- [frontend/app/register/page.tsx](frontend/app/register/page.tsx) — invite banner, locked role, invite_token passed on submit
+- [frontend/app/dashboard/settings/page.tsx](frontend/app/dashboard/settings/page.tsx) — Team Invitations panel in admin section
+
+---
+
+### 4.11 Google Meet Auto-Generation for Meeting Tasks
+
+**What it does:**
+When a task title contains meeting-related keywords (e.g. "standup", "sync", "review") or the user explicitly toggles "Schedule as meeting", Synkro automatically creates a Google Calendar event with conferenceData and stores the resulting Google Meet URL on the task. The Meet link is shown as a green "Join Meeting" button on the task card.
+
+**How it works — Task creation:**
+1. User types a task title such as "Sprint planning meeting".
+2. The frontend detects the keyword client-side and shows an inline banner: _"This looks like a meeting — generate a Google Meet link? [Yes] [No]"_.
+3. User clicks Yes (or toggles the "Schedule as meeting" checkbox) and optionally sets a meeting date/time and duration.
+4. `POST /api/tasks` is called with `is_meeting_task=true`, `meeting_scheduled_at`, and `meeting_duration_minutes`.
+5. Backend auto-detects or accepts the flag, finds the user's Google Calendar integration, and calls `GoogleCalendarService.create_task_meeting_event()`.
+6. The service creates a Calendar event with `conferenceData.conferenceSolutionKey = "hangoutsMeet"` and `conferenceDataVersion=1`.
+7. The resulting `hangoutLink` is stored in `tasks.google_meet_link`; `calendar_event_id` is also stored.
+8. API response includes the Meet URL; the task card immediately shows the "Join Meeting" button.
+
+**How it works — Manual generation:**
+- `POST /api/tasks/{id}/generate-meet-link` — works for any existing task.
+- Requires Google Calendar to be connected in Settings.
+- Shown in the UI as a "Generate Meet Link" button when `is_meeting_task=true` but `google_meet_link` is null.
+
+**How it works — Update flow:**
+- Toggling `is_meeting_task` on: generates a Meet event if Calendar is connected.
+- Changing `meeting_scheduled_at` / `meeting_duration_minutes`: updates the existing Calendar event.
+- Toggling `is_meeting_task` off: deletes the Calendar event and clears the Meet link.
+
+**Celery fallback:**
+- If inline generation fails (API flakiness, timeout), `generate_meet_link_for_task` Celery task is queued.
+- Retries up to 3 times with 30s / 60s / 90s back-off.
+
+**New DB columns added to `tasks` (migration 010):**
+| Column | Type | Default | Purpose |
+|---|---|---|---|
+| `is_meeting_task` | Boolean | False | Flags task as a scheduled meeting |
+| `google_meet_link` | VARCHAR(500) | NULL | Auto-generated Google Meet URL |
+| `meeting_scheduled_at` | DateTime | NULL | Meeting start time (separate from `due_date`) |
+| `meeting_duration_minutes` | Integer | 60 | Meeting length for calendar event |
+
+**Files:**
+- [backend/alembic/versions/010_add_meeting_fields_to_tasks.py](backend/alembic/versions/010_add_meeting_fields_to_tasks.py) — migration
+- [backend/app/models/task.py](backend/app/models/task.py) — 4 new ORM columns
+- [backend/app/schemas/task.py](backend/app/schemas/task.py) — new request/response fields
+- [backend/app/services/google_calendar_service.py](backend/app/services/google_calendar_service.py) — `is_meeting_related()`, `create_task_meeting_event()`
+- [backend/app/routers/tasks.py](backend/app/routers/tasks.py) — detection in create/update + `POST /{id}/generate-meet-link`
+- [backend/app/tasks/integration_tasks.py](backend/app/tasks/integration_tasks.py) — `generate_meet_link_for_task` Celery fallback
+- [frontend/types/index.ts](frontend/types/index.ts) — extended `Task` interface
+- [frontend/lib/api.ts](frontend/lib/api.ts) — `generateMeetLink()` method
+- [frontend/components/create-task-dialog.tsx](frontend/components/create-task-dialog.tsx) — auto-detect banner, meeting toggle, date/duration fields
+- [frontend/app/dashboard/tasks/page.tsx](frontend/app/dashboard/tasks/page.tsx) — "Join Meeting" button + "Generate Meet Link" fallback
+
+---
+
 ## 10. What Still Needs to Be Built
 
 ### HIGH PRIORITY — Core missing functionality
@@ -772,10 +873,7 @@ The current implementation uses FastAPI's built-in `BackgroundTasks`, which proc
 - Mark action items as rejected (not relevant).
 - This connects the core meeting → task workflow that is the product's main value proposition.
 
-**Team invitation flow**
-- Currently, every new user auto-creates their own team at registration, which means the admin and other team members end up on separate teams.
-- Need: admin generates an invite link or invite code; new users register using that code and join the admin's existing team.
-- Without this, the multi-user team features (shared tasks, shared meetings, analytics) do not work correctly in a real deployment.
+**Team invitation flow** ✅ — Implemented (2026-05-16). Admin generates invite links from Settings; new users register via `?invite=<token>` URL to join the team. See section 4.12.
 
 **Email-based password reset**
 - Currently the reset token is returned in the API response (visible on screen). This is dev-only.
@@ -828,7 +926,7 @@ The current implementation uses FastAPI's built-in `BackgroundTasks`, which proc
 ## 11. Priority Roadmap
 
 ### Phase 1 — Make the core workflow functional (immediate)
-1. **Team invitation system** — without this, the multi-user features are broken in real use
+1. ~~**Team invitation system**~~ — ✅ Implemented (2026-05-16): admin generates invite links; new users register via `?invite=<token>` URL and join the team automatically
 2. **Action item → Task conversion UI** — this is the product's main AI value proposition
 3. **Email password reset** — basic security requirement for any real user
 

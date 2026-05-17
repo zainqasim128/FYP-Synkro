@@ -80,7 +80,7 @@ class JiraService:
             .removeprefix("http://")
         )
         self._domain = clean_domain
-        self._base_url = f"https://{clean_domain}/rest/api/3"
+        self._base_url = f"https://{clean_domain}/rest/api/3/"
 
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
@@ -137,6 +137,30 @@ class JiraService:
         """
         resp = await self._request("project/search", method="GET")
         return resp.get("values", [])
+
+    async def search_users(self, query: str = "") -> List[Dict[str, Any]]:
+        """Search for Jira users accessible to the authenticated account.
+
+        Used to build the Synkro → Jira assignee mapping (user_map).
+
+        Args:
+            query: Optional text to filter users by name or email.
+
+        Returns:
+            List of user dicts with ``accountId``, ``displayName``, ``emailAddress``.
+        """
+        try:
+            resp = await self._client.request(
+                "GET",
+                "users/search",
+                params={"query": query, "maxResults": 50},
+            )
+            if resp.status_code == 200 and resp.content:
+                result = resp.json()
+                return result if isinstance(result, list) else []
+        except Exception as exc:
+            logger.warning("Could not search Jira users: %s", exc)
+        return []
 
     # ── Issues ───────────────────────────────────────────────────────────────
 
@@ -280,6 +304,105 @@ class JiraService:
             issue_id_or_key,
             transition_id,
         )
+
+    # ── Comments ─────────────────────────────────────────────────────────────
+
+    async def add_comment(self, issue_key: str, body: str) -> Dict[str, Any]:
+        """Post a plain-text comment to a Jira issue.
+
+        The body is converted to ADF so Jira Cloud accepts it.
+
+        Returns:
+            Jira comment object (id, body, author, created, etc.)
+        """
+        return await self._request(
+            f"issue/{issue_key}/comment",
+            method="POST",
+            json={"body": _to_adf(body)},
+        )
+
+    async def get_comments(self, issue_key: str) -> List[Dict[str, Any]]:
+        """Return all comments for a Jira issue.
+
+        Returns:
+            List of comment dicts (id, body, author, created, updated).
+        """
+        resp = await self._request(f"issue/{issue_key}/comment", method="GET")
+        return resp.get("comments", [])
+
+    # ── Webhooks ─────────────────────────────────────────────────────────────
+
+    async def register_webhook(
+        self,
+        callback_url: str,
+        events: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Register a webhook with Jira Cloud (webhooks 1.0 API).
+
+        Jira will POST to *callback_url* for each listed event.  The URL should
+        include a ``?secret=`` query parameter so the receiving endpoint can
+        verify the request came from Jira.
+
+        Args:
+            callback_url: Full public URL Jira should call, including secret.
+            events: Jira event names to subscribe to.  Defaults to issue
+                    updated/deleted and comment created.
+
+        Returns:
+            Jira webhook registration response (includes ``id``, ``self`` link).
+
+        Raises:
+            ValueError: If Jira returns a non-2xx status.
+        """
+        if events is None:
+            events = ["jira:issue_updated", "jira:issue_deleted", "comment_created"]
+
+        webhook_api_url = f"https://{self._domain}/rest/webhooks/1.0/webhook"
+        resp = await self._client.request(
+            "POST",
+            webhook_api_url,
+            json={
+                "name": "Synkro",
+                "url": callback_url,
+                "events": events,
+                "excludeBody": False,
+            },
+        )
+        if resp.status_code not in (200, 201):
+            raise ValueError(
+                f"Webhook registration failed: HTTP {resp.status_code} — {resp.text[:300]}"
+            )
+        result = resp.json()
+        # Jira Cloud may omit "id" and only return a "self" URL like
+        # ".../rest/webhooks/1.0/webhook/123" — extract the numeric ID from it.
+        if not result.get("id") and result.get("self"):
+            try:
+                result["id"] = int(result["self"].rstrip("/").split("/")[-1])
+            except (ValueError, IndexError):
+                pass
+        logger.info(
+            "Jira webhook registered: id=%s url=%s",
+            result.get("id"),
+            callback_url,
+        )
+        return result
+
+    async def delete_webhook(self, webhook_id: int) -> None:
+        """Deregister a Jira Cloud webhook by numeric ID.
+
+        Args:
+            webhook_id: The numeric ID returned by :meth:`register_webhook`.
+
+        Raises:
+            ValueError: If Jira returns a non-2xx status.
+        """
+        webhook_api_url = f"https://{self._domain}/rest/webhooks/1.0/webhook/{webhook_id}"
+        resp = await self._client.request("DELETE", webhook_api_url)
+        if resp.status_code not in (200, 204):
+            raise ValueError(
+                f"Webhook deletion failed: HTTP {resp.status_code} — {resp.text[:300]}"
+            )
+        logger.info("Jira webhook %s deleted", webhook_id)
 
     async def update_issue_fields(
         self,

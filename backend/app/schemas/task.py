@@ -32,6 +32,20 @@ class TaskCreate(TaskBase):
     assignee_id: Optional[str] = None
     source_type: str = Field(default="manual")
     source_id: Optional[str] = None
+    is_meeting_task: bool = False
+    meeting_scheduled_at: Optional[datetime] = None
+    meeting_duration_minutes: int = 60
+
+    @field_validator("meeting_scheduled_at", mode="before")
+    @classmethod
+    def strip_meeting_timezone(cls, v):
+        if v is None:
+            return v
+        if isinstance(v, str):
+            v = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        if isinstance(v, datetime) and v.tzinfo is not None:
+            return v.replace(tzinfo=None)
+        return v
 
 
 class TaskUpdate(BaseModel):
@@ -43,10 +57,24 @@ class TaskUpdate(BaseModel):
     assignee_id: Optional[str] = None
     due_date: Optional[datetime] = None
     estimated_hours: Optional[int] = Field(None, ge=0)
+    is_meeting_task: Optional[bool] = None
+    meeting_scheduled_at: Optional[datetime] = None
+    meeting_duration_minutes: Optional[int] = None
 
     @field_validator("due_date", mode="before")
     @classmethod
     def strip_timezone(cls, v):
+        if v is None:
+            return v
+        if isinstance(v, str):
+            v = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        if isinstance(v, datetime) and v.tzinfo is not None:
+            return v.replace(tzinfo=None)
+        return v
+
+    @field_validator("meeting_scheduled_at", mode="before")
+    @classmethod
+    def strip_meeting_timezone(cls, v):
         if v is None:
             return v
         if isinstance(v, str):
@@ -82,6 +110,10 @@ class TaskResponse(TaskBase):
     external_id: Optional[str] = None
     calendar_event_id: Optional[str] = None
     calendar_synced_at: Optional[datetime] = None
+    is_meeting_task: bool = False
+    google_meet_link: Optional[str] = None
+    meeting_scheduled_at: Optional[datetime] = None
+    meeting_duration_minutes: int = 60
     created_at: datetime
     updated_at: Optional[datetime] = None
 
