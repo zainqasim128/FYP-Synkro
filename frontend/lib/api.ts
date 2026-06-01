@@ -152,7 +152,7 @@ export const taskApi = {
   createTask: (data: Record<string, any>) => api.post('/api/tasks', data),
   updateTask: (id: string, data: Record<string, any>) => api.patch(`/api/tasks/${id}`, data),
   deleteTask: (id: string) => api.delete(`/api/tasks/${id}`),
-  getStats: () => api.get('/api/tasks/stats'),
+  getStats: (params?: Record<string, any>) => api.get('/api/tasks/stats', { params }),
   generateMeetLink: (taskId: string) => api.post(`/api/tasks/${taskId}/generate-meet-link`),
 }
 
