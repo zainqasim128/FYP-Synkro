@@ -1,0 +1,378 @@
+================================================================================
+                    SYNKRO — PROJECT EXPLANATION DOCUMENT
+                    Final Year Project (FYP) — As of May 2026
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. WHAT IS SYNKRO?
+--------------------------------------------------------------------------------
+
+Synkro is an AI-Powered Workspace Orchestration System built as a Final Year
+Project (FYP). It is a centralised productivity platform designed specifically
+for software development teams. The core idea is to connect all tools a team
+uses — meetings, tasks, Slack, Gmail, and Jira — into a single
+AI-augmented dashboard so teams don't have to switch between multiple apps.
+
+Think of it as a "command center" that pulls meeting recordings, extracts action
+items automatically, assigns them as tasks, syncs those tasks to Jira, notifies
+team members via Slack, and lets you ask questions about your team's workload
+in plain English — all from one place.
+
+
+--------------------------------------------------------------------------------
+2. WHAT IS CURRENTLY WORKING
+--------------------------------------------------------------------------------
+
+The following features are fully implemented and functional:
+
+--- AUTHENTICATION & TEAMS ---
+  - User registration with 6 roles: admin, project_manager, team_lead,
+    senior_developer, developer, intern
+  - JWT-based stateless login with access token (30 min) + refresh token (7 days)
+  - Only one admin allowed per system; admin auto-creates a team on registration
+  - Non-admin users automatically join the existing team
+  - Password reset flow (token returned in response in dev mode)
+  - Team Invitation System (implemented 2026-05-16):
+      * Admin generates a one-time invite link with optional role and email lock
+      * Invites expire after 7 days and are single-use
+      * Invitee opens link → frontend shows "Join [Team]" banner, locks role
+      * Admin can view all pending invitations and revoke them
+      * Backend validates token and auto-assigns team + role on registration
+
+--- TASK MANAGEMENT ---
+  - Full CRUD: create, read, update, delete tasks
+  - Filters: by status (todo, in_progress, done, blocked), priority, assignee,
+    due date range
+  - Task stats endpoint: counts by status, overdue count, completion rate
+  - Task source tracking: manual, meeting, message, or AI-generated
+  - Non-admin users see only their own tasks; admins see all team tasks
+  - Task limit raised to 200 per request
+  - Unassigned filter: filter tasks with no assignee (admin-only)
+  - Work Balance Panel on the tasks page: per-member bar chart of active/done/
+    overdue tasks with click-to-filter capability
+  - Overdue alert banner: prominent red warning when overdue tasks exist
+  - Prominent assignee chip displayed on each task card
+
+--- MEETING INTELLIGENCE (AI PIPELINE) ---
+  - Admin uploads audio files (MP3, MP4, M4A) via the dashboard
+  - Full 4-stage AI pipeline runs as an async background task:
+      Stage 1 — Whisper Transcription: audio → plain text transcript
+      Stage 2 — Speaker Diarization: who said what (3-tier fallback system)
+      Stage 3 — Context Analysis: every utterance classified by type
+      Stage 4 — Summarisation + Action Item Extraction + Persistence
+  - Meeting status polling on the frontend every 5 seconds during processing
+  - Speaker-colored diarized transcript view in meeting detail page
+  - Context-type badges on each transcript segment (7 types):
+      task_assignment, task_completion, warning, progress_update,
+      question, decision, general
+  - Inline speaker name editor: map "Speaker A" → "Alice"
+  - Auto-assignment: when speaker names are mapped, pending action items are
+    automatically converted to tasks assigned to the matched team member
+  - TaskAssignmentDialog: popup that auto-opens when a meeting completes,
+    showing AI-suggested assignees per action item with override dropdowns
+  - Bulk-assign endpoint: batch-convert action items to tasks in one request
+  - Export: download transcript or AI summary as a plain text file
+  - Retry: re-queue a failed or stuck meeting transcription
+  - Meeting detail tabs: Transcript, Summary, Action Items, Speaker Stats
+
+--- JIRA INTEGRATION ---
+  - Connect via Jira email + API token (validated against Jira REST /myself)
+  - When a task is created → Celery background job creates a Jira issue
+  - When a task is updated → inline async sync updates the Jira issue fields
+    and transitions the status using dynamic workflow lookup
+  - task.external_id stores the Jira issue key (idempotent sync)
+  - List all Jira projects the connected account has access to
+
+--- SLACK INTEGRATION ---
+  - OAuth 2.0 integration (captures both bot token and user OAuth token)
+  - Demo mode: DEMO_SLACK_TOKEN env var auto-provisions Slack for all new users
+    without needing them to go through OAuth
+  - Events API webhook with HMAC-SHA256 signature verification
+  - Channel message sync: pull latest channel messages into Synkro
+  - Intent classification on synced messages (Celery): task_request, blocker,
+    question, information, urgent_issue, casual
+  - Send and receive Slack DMs directly from the Synkro UI
+  - Slack DM sync: import last 24 hours of Slack DMs into native DM threads
+  - Bot notifications: Slack message sent when a new task is created or a
+    native Synkro DM is sent
+
+--- GMAIL INTEGRATION ---
+  - Connect via IMAP App Password (no Google Cloud project required)
+  - Sync recent emails from Gmail into the database (deduplicated)
+  - Email list view with read/flagged status and full body view in a slide-out
+  - AI classification of emails: task_request, urgent, fyi, etc.
+
+--- NATIVE IN-APP DIRECT MESSAGES ---
+  - Full DM system between team members within Synkro itself
+  - Conversation threads with real-time-style polling UI
+  - Unread count badge in the sidebar (polls every 10 seconds)
+  - Slack DM sync: import Slack DM history into native threads
+  - Deduplication via Slack timestamp column
+  - Delete individual messages or clear all DMs
+
+--- AI CHAT ---
+  - Natural-language query interface at /dashboard/chat
+  - Backend gathers live context: current tasks, team members, recent meetings
+  - Sends context + query to Llama-3.3-70b (Groq) for a response
+  - Response includes which context was used and suggested actions the user
+    can take (e.g., "Create a task", "View meeting")
+
+--- ANALYTICS ---
+  - Workload stats: tasks by status and priority, overdue count, completion rate
+  - Team workload table: per-member breakdown of active tasks, completed in
+    last 30 days, overdue tasks, estimated hours
+  - Meeting insights: meeting counts, average duration, action item stats
+  - Productivity trend: daily created vs. completed tasks chart
+
+--- ADMIN PANEL ---
+  - Full user management: change role, activate/deactivate, delete users
+  - User count breakdown by role and active status
+  - Admin-only: upload meetings, see all team tasks, Work Balance Panel,
+    team invitation management
+  - Role-based UI rendering throughout the entire frontend
+
+--- SETTINGS PAGE ---
+  - Profile editing: full name, avatar URL, timezone
+  - Integration cards: connect/disconnect Gmail, Slack, and Jira with status
+  - Admin section: user list with inline role editor and delete buttons
+  - Team Invitations panel (admin): create invite, copy link, see pending list,
+    revoke invites
+
+
+--------------------------------------------------------------------------------
+3. LIFECYCLES IN SYNKRO
+--------------------------------------------------------------------------------
+
+--- 3.1 USER REGISTRATION & ONBOARDING LIFECYCLE ---
+
+  [Option A — Open Registration]
+  User visits /register → fills name, email, password, role
+  → POST /api/auth/register
+  → If first admin: new Team created, user assigned to it
+  → If non-admin: user auto-joined to the existing admin's team
+  → JWT tokens (access + refresh) issued and stored in localStorage
+  → Redirected to /dashboard
+  → authStore.initialize() restores session on page reload from localStorage
+
+  [Option B — Invite-Based Registration]
+  Admin generates invite at Settings → copies link (contains ?invite=<token>)
+  → Teammate opens link → frontend validates token → shows "Join [Team]" banner
+    and locks the role field → user fills in name, email, password
+  → POST /api/auth/register with invite_token
+  → Token validated: team + role overridden from invitation
+  → Token marked as used (one-time only)
+  → Same token issuance + redirect flow as Option A
+
+--- 3.2 MEETING PROCESSING LIFECYCLE ---
+
+  [Manual Upload]
+  Admin uploads audio file (MP3, MP4, M4A) via /dashboard/meetings
+  → POST /api/meetings/upload stores file to S3 / Cloudinary / local filesystem
+  → Meeting record created in DB (status: processing)
+  → process_meeting_background() queued as FastAPI BackgroundTask
+
+  [Pipeline — process_meeting_background()]
+  Status → processing
+  │
+  Stage 1: Whisper Transcription
+    - Groq whisper-large-v3-turbo called (primary)
+    - Falls back to OpenAI whisper-1 if Groq fails
+    - Output: plain transcript text + timestamped segments
+    - Meeting duration calculated via mutagen
+  │
+  Stage 2: Speaker Diarization
+    - Tier 1: pyannote.audio (local, best quality) — needs HUGGINGFACE_TOKEN
+    - Tier 2: AssemblyAI (cloud) — needs ASSEMBLYAI_API_KEY
+    - Tier 3: LLM inference via Groq — always available as last resort
+    - Output: [{speaker, start, end, text}] stored as JSON in diarized_transcript
+  │
+  Stage 3: Context Analysis
+    - diarized transcript sent to Groq llama-3.3-70b-versatile
+    - Every segment classified: task_assignment, task_completion, warning,
+      progress_update, question, decision, general
+    - Action items extracted with: description, assignee_mentioned, deadline,
+      confidence score, speaker_label, assigned_by
+  │
+  Stage 4: Summarisation + Persistence
+    - AI summary generated (speaker-aware)
+    - Action items with confidence >= 0.6 saved to action_items table
+    - Deadlines parsed with dateparser library
+    - Meeting status set to "completed"
+  │
+  Frontend polls every 5s until status = completed
+  → TaskAssignmentDialog auto-opens if pending action items exist
+  → Admin/user maps speaker labels to real names (Speaker A → Alice)
+  → Backend fuzzy-matches names to team members
+  → Pending action items auto-converted to assigned tasks
+
+--- 3.3 TASK LIFECYCLE ---
+
+  Task Created (manual or from meeting action item)
+  → POST /api/tasks or auto-convert from action item
+  → Saved to DB with status: todo
+  → If Jira connected: Celery job sync_task_to_jira fires
+      → Jira issue created, key stored in task.external_id
+  → If Slack connected: Celery job notify_slack_task_created fires
+      → Block Kit message posted to Slack channel
+
+  Task Updated
+  → PATCH /api/tasks/{id}
+  → If task.external_id set (Jira linked): inline async Jira sync
+      → Jira issue fields updated, status transitioned via dynamic lookup
+  → Frontend cache for "tasks" and "task-stats" invalidated via TanStack Query
+
+  Task Deleted
+  → DELETE /api/tasks/{id}
+  → If linked action_item exists: action_item.task_id set to NULL (not deleted)
+
+--- 3.4 AUTHENTICATION LIFECYCLE ---
+
+  Login → access_token (30 min) + refresh_token (7 days) stored in localStorage
+  → Every API request: Authorization: Bearer <access_token> header attached
+  → On 401 response: Axios interceptor queues all pending requests
+      → POST /api/auth/refresh called automatically
+      → New access_token stored
+      → Queued requests replayed with new token
+  → If refresh fails: localStorage cleared → redirect to /login
+
+--- 3.5 SLACK MESSAGE LIFECYCLE ---
+
+  Slack message posted in a connected workspace
+  → Slack Events API sends POST to /api/webhooks/slack/events
+  → HMAC-SHA256 signature verified
+  → Message saved to messages table
+  → Celery process_message_for_intent task fired
+  → Groq classifies intent (task_request, blocker, etc.)
+  → Entities extracted (people, dates, projects, priorities)
+  → Message shown in /dashboard/slack with intent badge
+
+--- 3.6 DIRECT MESSAGE LIFECYCLE ---
+
+  User A opens /dashboard/messages → selects User B
+  → GET /api/dm/{user_b_id} fetches thread + marks received messages as read
+  → User A types message → POST /api/dm/send
+  → Message saved to direct_messages table
+  → Slack bot notification sent to User B's Slack account (if connected)
+  → Unread badge in sidebar updates via 10-second poll of /api/dm/unread-count
+
+--- 3.7 EMAIL SYNC LIFECYCLE ---
+
+  User connects Gmail (IMAP App Password) via Settings
+  → POST /api/integrations/gmail/connect stores encrypted credentials
+  → User clicks "Sync" on /dashboard/emails
+  → POST /api/emails/sync triggers gmail_service.py
+  → imaplib.IMAP4_SSL connects to Gmail
+  → Emails fetched, HTML stripped to plain text
+  → Saved to emails table (deduplicated by user_id + gmail_message_id)
+  → Email list refreshes with new messages
+
+
+--------------------------------------------------------------------------------
+4. TECH STACK
+--------------------------------------------------------------------------------
+
+--- BACKEND ---
+
+  Runtime Language : Python 3.11
+  Web Framework    : FastAPI (async, high-performance REST API)
+  ORM              : SQLAlchemy 2.x (fully async with asyncpg driver)
+  Database         : PostgreSQL (async connections via asyncpg)
+  Migrations       : Alembic (11 migration versions so far)
+  Auth             : JWT (PyJWT library) + bcrypt password hashing (passlib)
+  Token Encryption : Fernet symmetric encryption (cryptography library)
+                     All OAuth tokens stored encrypted at rest in DB
+  Background Tasks : FastAPI BackgroundTasks (primary, used for meeting pipeline)
+                     Celery (legacy, used for Jira sync + Slack notifications)
+  Message Broker   : Redis (for Celery task queue)
+  File Storage     : AWS S3 (primary) / Cloudinary (alternative) / local fs (dev)
+  Config           : Pydantic Settings (reads from .env file)
+  Date Parsing     : dateparser library (parses natural-language deadlines)
+  Audio Duration   : mutagen library
+
+  AI Services:
+    Transcription  : Groq whisper-large-v3-turbo (free, primary)
+                     OpenAI whisper-1 (paid, fallback)
+    LLM            : Groq llama-3.3-70b-versatile (free, primary)
+                     OpenAI gpt-4 (paid, fallback)
+    Diarization    : pyannote.audio (local, Tier 1)
+                     AssemblyAI (cloud, Tier 2)
+                     Groq LLM inference (Tier 3, always available)
+
+  External APIs:
+    Slack          : Slack Web API + Events API (OAuth 2.0)
+    Jira           : Jira Cloud REST API v3 (Basic Auth)
+    Gmail          : IMAP via imaplib (App Password, no Google Cloud needed)
+
+--- FRONTEND ---
+
+  Framework        : Next.js 14 (App Router)
+  Language         : TypeScript
+  State Management : Zustand (authStore for user session, themeStore for dark mode)
+  Server State     : TanStack Query / React Query v5 (data fetching + caching)
+  HTTP Client      : Axios (with request/response interceptors for auth)
+  Styling          : Tailwind CSS v3
+  UI Components    : Radix UI primitives (Dialog, Label, etc.) following
+                     the shadcn/ui pattern
+  Icons            : Lucide React
+  Routing          : Next.js App Router (file-system based)
+
+--- INFRASTRUCTURE / DEVOPS ---
+
+  Containerization : Docker + docker-compose (Postgres + Redis + backend)
+  Deployment       : Railway (railway.json + Procfile configured)
+  Environment      : .env (backend), .env.local (frontend)
+  Testing          : pytest (backend unit + integration tests)
+  Version Control  : Git
+
+--- DATABASE SCHEMA SUMMARY ---
+
+  Tables (11 Alembic migrations applied):
+    users             — auth, roles, team membership, profile
+    teams             — team name, plan tier, settings
+    tasks             — title, status, priority, due date, assignee, Jira link
+    meetings          — recording URL, transcript, diarized JSON, AI summary
+    action_items      — extracted from meetings, linked to tasks when converted
+    messages          — Slack channel messages with intent classification
+    direct_messages   — native in-app + synced Slack DMs
+    emails            — synced Gmail messages with AI classification
+    integrations      — OAuth tokens (Fernet-encrypted), platform metadata
+    team_invitations  — one-time invite tokens for team onboarding
+
+
+--------------------------------------------------------------------------------
+5. SUMMARY OF WHAT MAKES SYNKRO UNIQUE
+--------------------------------------------------------------------------------
+
+  1. FULLY AI-NATIVE MEETING PIPELINE
+     Synkro doesn't just store meeting recordings — it transcribes them,
+     identifies every speaker, classifies what kind of statement each utterance
+     is (task assignment, warning, decision, etc.), and extracts action items
+     with assignees and deadlines, all automatically.
+
+  2. ZERO-FRICTION INTEGRATION SETUP
+     Gmail works via IMAP App Password (no Google Cloud project).
+     Slack has a demo mode that provisions the integration automatically.
+     Jira connects via email + API token in seconds.
+
+  3. BIDIRECTIONAL JIRA SYNC
+     Tasks created in Synkro become Jira issues. Updates in Synkro sync back
+     to Jira. The link is maintained via task.external_id (Jira issue key).
+
+  4. 3-TIER DIARIZATION FALLBACK
+     Speaker identification never completely fails. It tries local pyannote,
+     then AssemblyAI cloud, and falls back to LLM-based inference using only
+     the Groq API key that's already required for transcription.
+
+  5. AI CHAT OVER LIVE TEAM DATA
+     The AI chat feature doesn't answer generic questions — it gathers the
+     team's actual current tasks, meeting history, and workload stats as
+     context before calling the LLM, so answers are specific to your team.
+
+  6. INVITE-BASED ONBOARDING
+     Admins can invite teammates with pre-set roles via a one-time token link.
+     This prevents accidental role mismatches and unauthorized registrations.
+
+================================================================================
+                              END OF DOCUMENT
+================================================================================

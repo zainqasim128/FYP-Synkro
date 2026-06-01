@@ -208,6 +208,7 @@ export const messagesApi = {
   getSlackUsers: () => api.get('/api/messages/dms/users'),
   sendDm: (payload: { slack_user_id: string; message: string; channel_id?: string }) =>
     api.post('/api/messages/dms/send', payload),
+  deleteMessage: (id: string) => api.delete(`/api/messages/${id}`),
 }
 
 // Integrations API

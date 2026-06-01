@@ -16,6 +16,7 @@ import {
   X,
   AtSign,
   Download,
+  Trash2,
 } from 'lucide-react'
 import { formatRelativeTime } from '@/lib/utils'
 import Link from 'next/link'
@@ -61,6 +62,14 @@ export default function SlackPage() {
       queryClient.invalidateQueries({ queryKey: ['slack-messages'] })
       queryClient.invalidateQueries({ queryKey: ['message-stats'] })
       setTimeout(() => setSyncMsg(''), 4000)
+    },
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => messagesApi.deleteMessage(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['slack-messages'] })
+      queryClient.invalidateQueries({ queryKey: ['message-stats'] })
     },
   })
 
@@ -180,41 +189,62 @@ export default function SlackPage() {
       ) : (
         <Card>
           <CardContent className="p-0 divide-y">
-            {messages.map((msg) => (
-              <div key={msg.id} className="px-4 py-3 hover:bg-muted/50 transition-colors flex items-start gap-3">
-                {/* Avatar */}
-                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#4A154B] text-white text-xs font-bold mt-0.5">
-                  {msg.sender_name
-                    ? msg.sender_name.slice(0, 2).toUpperCase()
-                    : <Hash className="h-4 w-4" />}
-                </div>
-
-                {/* Content */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-sm font-semibold">
-                      {msg.sender_name || 'Unknown'}
-                    </span>
-                    {msg.intent && (
-                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${INTENT_COLORS[msg.intent] || INTENT_COLORS.information}`}>
-                        {msg.intent.replace('_', ' ')}
-                      </span>
-                    )}
-                    {msg.processed && (
-                      <Badge variant="outline" className="text-xs">AI processed</Badge>
-                    )}
+            {messages.map((msg) => {
+              const isDeleting = deleteMutation.isPending && (deleteMutation.variables === msg.id)
+              return (
+                <div key={msg.id} className="px-4 py-3 hover:bg-muted/50 transition-colors flex items-start gap-3">
+                  {/* Avatar */}
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#4A154B] text-white text-xs font-bold mt-0.5">
+                    {msg.sender_name
+                      ? msg.sender_name.slice(0, 2).toUpperCase()
+                      : <Hash className="h-4 w-4" />}
                   </div>
-                  <p className="text-sm text-foreground mt-0.5 whitespace-pre-wrap break-words">
-                    {msg.content}
-                  </p>
-                </div>
 
-                {/* Time */}
-                <span className="text-xs text-muted-foreground whitespace-nowrap shrink-0 mt-1">
-                  {msg.timestamp ? formatRelativeTime(msg.timestamp) : ''}
-                </span>
-              </div>
-            ))}
+                  {/* Content */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-semibold">
+                        {msg.sender_name || 'Unknown'}
+                      </span>
+                      {msg.intent && (
+                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${INTENT_COLORS[msg.intent] || INTENT_COLORS.information}`}>
+                          {msg.intent.replace('_', ' ')}
+                        </span>
+                      )}
+                      {msg.processed && (
+                        <Badge variant="outline" className="text-xs">AI processed</Badge>
+                      )}
+                    </div>
+                    <p className="text-sm text-foreground mt-0.5 whitespace-pre-wrap break-words">
+                      {msg.content}
+                    </p>
+                  </div>
+
+                  {/* Time + Delete */}
+                  <div className="flex items-center gap-2 shrink-0 mt-1">
+                    <span className="text-xs text-muted-foreground whitespace-nowrap">
+                      {msg.timestamp ? formatRelativeTime(msg.timestamp) : ''}
+                    </span>
+                    <button
+                      onClick={() => {
+                        if (confirm('Delete this message from Synkro? (You will need to delete it from Slack manually.)')) {
+                          deleteMutation.mutate(msg.id)
+                        }
+                      }}
+                      disabled={isDeleting}
+                      className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-950 text-muted-foreground hover:text-red-600 transition-colors disabled:opacity-50"
+                      title="Delete message"
+                    >
+                      {isDeleting ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
           </CardContent>
         </Card>
       )}

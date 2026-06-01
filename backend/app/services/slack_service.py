@@ -32,7 +32,10 @@ _SLACK_API_BASE = "https://slack.com/api/"
 
 # Required scopes — extend this list if you add Slack features later
 _BOT_SCOPES: List[str] = [
+    "channels:read",
     "channels:history",
+    "groups:read",
+    "groups:history",
     "chat:write",
     "users:read",
     "users:read.email",

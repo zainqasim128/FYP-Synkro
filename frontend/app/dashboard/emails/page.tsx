@@ -20,6 +20,7 @@ import {
   X,
   Plus,
   Trash2,
+  Eye,
 } from 'lucide-react'
 import { formatRelativeTime } from '@/lib/utils'
 
@@ -111,6 +112,15 @@ export default function EmailsPage() {
     mutationFn: (id: string) => emailApi.deleteEmail(id),
     onSuccess: (_, id) => {
       if (expandedId === id) setExpandedId(null)
+      queryClient.invalidateQueries({ queryKey: ['emails'] })
+      queryClient.invalidateQueries({ queryKey: ['email-stats'] })
+    },
+  })
+
+  // Mark as read mutation
+  const markReadMutation = useMutation({
+    mutationFn: (id: string) => emailApi.markAsRead(id),
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['emails'] })
       queryClient.invalidateQueries({ queryKey: ['email-stats'] })
     },
@@ -298,7 +308,7 @@ export default function EmailsPage() {
                       </p>
                     </button>
 
-                    {/* Date + expand + delete */}
+                    {/* Date + expand + actions */}
                     <div className="flex items-center gap-2 shrink-0">
                       <button onClick={() => setExpandedId(isExpanded ? null : em.id)} className="flex items-center gap-1">
                         <span className="text-xs text-muted-foreground whitespace-nowrap">
@@ -310,6 +320,23 @@ export default function EmailsPage() {
                           <ChevronDown className="h-4 w-4 text-muted-foreground" />
                         )}
                       </button>
+                      {!em.is_read && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            markReadMutation.mutate(em.id)
+                          }}
+                          disabled={markReadMutation.isPending && markReadMutation.variables === em.id}
+                          className="p-1 rounded hover:bg-blue-100 dark:hover:bg-blue-950 text-muted-foreground hover:text-blue-600 transition-colors disabled:opacity-50"
+                          title="Mark as read"
+                        >
+                          {markReadMutation.isPending && markReadMutation.variables === em.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Eye className="h-4 w-4" />
+                          )}
+                        </button>
+                      )}
                       <button
                         onClick={() => {
                           if (confirm('Delete this email? It will also be removed from Gmail.')) {

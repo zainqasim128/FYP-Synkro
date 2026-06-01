@@ -386,7 +386,11 @@ async def slack_oauth_start(
     The frontend should redirect the user to ``authorization_url``.
     After consent Slack redirects to ``SLACK_REDIRECT_URI`` with ``code``.
     """
-    # Pass user ID as state so the callback can identify the user without a session
+    if not settings.SLACK_CLIENT_ID or not settings.SLACK_CLIENT_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Slack OAuth credentials are not configured. Set SLACK_CLIENT_ID and SLACK_CLIENT_SECRET in the backend .env file.",
+        )
     url = slack_module.SlackService.authorization_url(state=current_user.id)
     return SlackConnectResponse(authorization_url=url)
 
@@ -1481,13 +1485,26 @@ async def sync_integration(
             token = decrypt_value(integration.access_token)
             svc = slack_module.SlackService(token)
 
-            # Fetch all public channels
-            resp = await svc._request("conversations.list", method="GET", params={
-                "types": "public_channel,private_channel",
-                "limit": 200,
-                "exclude_archived": "true",
-            })
-            channels = resp.get("channels", [])
+            # Fetch channels the bot has access to. Try public+private first;
+            # fall back to public only if the token lacks groups:read scope.
+            channels: List[Dict[str, Any]] = []
+            for ch_types in ("public_channel,private_channel", "public_channel"):
+                try:
+                    resp = await svc._request("conversations.list", method="GET", params={
+                        "types": ch_types,
+                        "limit": 200,
+                        "exclude_archived": "true",
+                    })
+                    channels = resp.get("channels", [])
+                    break
+                except ValueError as ve:
+                    if "missing_scope" in str(ve) and ch_types != "public_channel":
+                        logger.warning("Slack conversations.list missing scope for '%s', retrying with public only: %s", ch_types, ve)
+                        continue
+                    raise
+
+            if not channels:
+                logger.warning("Slack sync: no channels returned for user %s", current_user.id)
 
             # Cache user ID → display name to avoid redundant API calls
             user_name_cache: Dict[str, str] = {}
@@ -1512,7 +1529,6 @@ async def sync_integration(
                 return user_name_cache[uid]
 
             # Fix existing messages that have raw Slack user IDs as sender_name
-            from sqlalchemy import update as sa_update
             stale_q = await db.execute(
                 select(Message).where(
                     Message.platform == "slack",
@@ -1527,10 +1543,25 @@ async def sync_integration(
                         m.sender_name = resolved
             await db.commit()
 
+            # Use last_synced_at as oldest to fetch all messages since last sync
+            oldest_ts: Optional[str] = None
+            if integration.last_synced_at:
+                oldest_ts = str(integration.last_synced_at.timestamp())
+
+            new_messages_to_process: List[Any] = []
+
             for ch in channels:
                 ch_id = ch["id"]
                 try:
-                    messages = await svc.get_channel_messages(ch_id, limit=50)
+                    # Join the channel first so the bot can read its history
+                    if not ch.get("is_member"):
+                        await svc.join_channel(ch_id)
+
+                    messages = await svc.get_channel_messages(
+                        ch_id,
+                        limit=200,
+                        oldest=oldest_ts,
+                    )
                     for msg in messages:
                         if not msg.get("text") or msg.get("subtype"):
                             continue
@@ -1545,7 +1576,7 @@ async def sync_integration(
 
                         ts = float(msg.get("ts", 0))
                         msg_time = dt.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None) if ts else dt.utcnow()
-                        db.add(Message(
+                        new_msg = Message(
                             user_id=current_user.id,
                             platform="slack",
                             external_id=external_id,
@@ -1554,14 +1585,97 @@ async def sync_integration(
                             channel_id=ch_id,
                             channel_type="channel",
                             timestamp=msg_time,
-                        ))
+                        )
+                        db.add(new_msg)
+                        new_messages_to_process.append(new_msg)
                         synced_count += 1
-                except Exception:
+                except Exception as ch_err:
+                    logger.warning("Slack sync: skipping channel %s: %s", ch_id, ch_err)
                     continue
 
             await db.commit()
+
+            # AI processing: classify intent + create tasks from task_request messages
+            if new_messages_to_process and current_user.team_id:
+                from app.services.ai_service import classify_intent, extract_task_entities
+                from app.models.task import Task as TaskModel, TaskStatus, TaskPriority, TaskSourceType
+                from app.models.message import MessageIntent
+
+                # Fetch team members once for assignee matching
+                team_result = await db.execute(
+                    select(User).where(User.team_id == current_user.team_id)
+                )
+                team_members = team_result.scalars().all()
+
+                for new_msg in new_messages_to_process:
+                    try:
+                        await db.refresh(new_msg)
+                        intent_result = await classify_intent(new_msg.content)
+                        intent_str = intent_result.get("intent", "information")
+
+                        intent_map: Dict[str, Any] = {
+                            "task_request": MessageIntent.TASK_REQUEST,
+                            "blocker": MessageIntent.BLOCKER,
+                            "question": MessageIntent.QUESTION,
+                            "information": MessageIntent.INFORMATION,
+                            "urgent_issue": MessageIntent.URGENT_ISSUE,
+                            "casual": MessageIntent.CASUAL,
+                        }
+                        new_msg.intent = intent_map.get(intent_str, MessageIntent.INFORMATION)
+                        new_msg.processed = True
+
+                        if intent_str == "task_request":
+                            entities = await extract_task_entities(new_msg.content)
+                            title = entities.get("title", "").strip()
+                            if title and entities.get("confidence", 0) >= 0.5:
+                                # Match assignee name to a team member
+                                assignee_id: Optional[str] = None
+                                raw_assignee = (entities.get("assignee") or "").strip().lower()
+                                if raw_assignee:
+                                    for member in team_members:
+                                        if raw_assignee in member.full_name.lower() or member.full_name.lower().startswith(raw_assignee):
+                                            assignee_id = member.id
+                                            break
+                                if not assignee_id:
+                                    assignee_id = current_user.id
+
+                                priority_str = (entities.get("priority") or "medium").lower()
+                                priority_map2: Dict[str, Any] = {
+                                    "low": TaskPriority.LOW,
+                                    "medium": TaskPriority.MEDIUM,
+                                    "high": TaskPriority.HIGH,
+                                    "urgent": TaskPriority.URGENT,
+                                }
+                                task_priority = priority_map2.get(priority_str, TaskPriority.MEDIUM)
+
+                                due_date = None
+                                raw_due = entities.get("deadline")
+                                if raw_due:
+                                    try:
+                                        due_date = datetime.strptime(raw_due, "%Y-%m-%d")
+                                    except Exception:
+                                        pass
+
+                                db.add(TaskModel(
+                                    title=title[:500],
+                                    description=entities.get("description") or f"From Slack: {new_msg.content}",
+                                    status=TaskStatus.TODO,
+                                    priority=task_priority,
+                                    due_date=due_date,
+                                    assignee_id=assignee_id,
+                                    created_by_id=current_user.id,
+                                    team_id=current_user.team_id,
+                                    source_type=TaskSourceType.AI,
+                                    source_id=new_msg.id,
+                                ))
+
+                        await db.commit()
+                    except Exception as proc_err:
+                        logger.warning("Slack AI processing failed for msg %s: %s", new_msg.id, proc_err)
+
         except Exception as e:
-            logger.warning("Slack sync failed: %s", e)
+            logger.error("Slack sync failed for user %s: %s", current_user.id, e)
+            raise HTTPException(status_code=500, detail=f"Slack sync failed: {e}")
 
     integration.last_synced_at = datetime.utcnow()
     await db.commit()

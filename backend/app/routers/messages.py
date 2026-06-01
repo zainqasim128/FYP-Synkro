@@ -240,6 +240,37 @@ async def send_dm(
     return {"ok": True, "channel_id": channel_id}
 
 
+@router.delete("/{message_id}")
+async def delete_message(
+    message_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a synced Slack message from the local database."""
+    result = await db.execute(
+        select(Message).where(
+            Message.id == message_id,
+            Message.user_id == current_user.id,
+        )
+    )
+    message = result.scalar_one_or_none()
+    if not message:
+        # Also allow deleting shared-channel messages the current user's sync created
+        result2 = await db.execute(
+            select(Message).where(
+                Message.id == message_id,
+                Message.platform == "slack",
+            )
+        )
+        message = result2.scalar_one_or_none()
+        if not message:
+            raise HTTPException(status_code=404, detail="Message not found")
+
+    await db.delete(message)
+    await db.commit()
+    return {"ok": True}
+
+
 @router.get("/dms/users")
 async def list_slack_users(
     current_user: User = Depends(get_current_user),
